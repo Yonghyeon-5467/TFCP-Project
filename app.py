@@ -8,6 +8,7 @@ import json
 import shutil
 from datetime import datetime
 import pandas as pd
+from streamlit_drawable_canvas import st_canvas
 
 # --- [1] 페이지 및 기본 설정 ---
 st.set_page_config(page_title="TFCP Data Manager", page_icon="🧪", layout="wide")
@@ -28,10 +29,9 @@ def load_model():
 
 model = load_model()
 
-# --- [3] 핵심 분석 엔진 (Smart Logic v12.0) ---
+# --- [3] 분석 엔진 (v12.5 Orange Expansion) ---
 
 def apply_gamma_correction(image, gamma=0.8):
-    """과노출 보정: 밝은 빛을 압축하여 색상 정보 복구"""
     invGamma = 1.0 / gamma
     table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
     return cv2.LUT(image, table)
@@ -66,9 +66,9 @@ def filter_nested_boxes(boxes):
     return [boxes[idx] for idx in keep_indices]
 
 def detect_particles_heuristically(img):
-    """AI 실패 시 백업 탐지"""
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask_o = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([45, 255, 255]))
+    # 백업 탐지에서도 Orange 범위를 넓힘
+    mask_o = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([60, 255, 255]))
     mask_c = cv2.inRange(hsv, np.array([85, 30, 30]), np.array([165, 255, 255]))
     combined = cv2.bitwise_or(mask_o, mask_c)
     kernel = np.ones((25,25), np.uint8)
@@ -83,13 +83,11 @@ def detect_particles_heuristically(img):
     for cnt in contours:
         if cv2.contourArea(cnt) > 3000:
             x, y, w, h = cv2.boundingRect(cnt)
-            aspect_ratio = float(w)/h if h>0 else 0
-            if 0.2 < aspect_ratio < 5.0:
+            if 0.2 < float(w)/h < 5.0:
                 found_boxes.append(FakeBox([x, y, x+w, y+h]))
     return found_boxes
 
 def process_frame(img):
-    # 1. 감마 보정 (과노출 복구의 핵심)
     img = apply_gamma_correction(img, gamma=0.8)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     img_h, img_w = img.shape[:2]
@@ -105,7 +103,8 @@ def process_frame(img):
         if (x2-x1) < 50 or (y2-y1) < 50: continue
         roi_hsv = hsv[max(0,y1):min(img_h,y2), max(0,x1):min(img_w,x2)]
         if roi_hsv.size == 0: continue
-        if np.sum(cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([55, 255, 255]))) + np.sum(cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))) > 200:
+        # 신호 검증도 Orange 확장 반영
+        if np.sum(cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([70, 255, 255]))) + np.sum(cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))) > 200:
             combined_boxes.append((box, "AI"))
 
     if not combined_boxes:
@@ -121,48 +120,35 @@ def process_frame(img):
         if roi_hsv.size == 0: continue
         
         valid_mask = (roi_hsv[:,:,1]>25) & (roi_hsv[:,:,2]>25)
-        mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([60, 255, 255]))
+        
+        # [수정] Orange 범위를 0-75로 확장 (노란색/연두색 형광까지 포용)
+        mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([75, 255, 255]))
         mask_cyan_candidate = cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
         
         mask_particle_body = np.zeros_like(mask_orange)
+        # 입자 덩어리 잡기
         contours, _ = cv2.findContours(cv2.morphologyEx(mask_orange & (valid_mask.astype(np.uint8)*255), cv2.MORPH_CLOSE, np.ones((5,5), np.uint8)), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         p_count = sum(cv2.contourArea(cnt) for cnt in contours if cv2.contourArea(cnt) > 20)
         
         box_area = (nx2-nx1)*(ny2-ny1)
         orange_area_pct = (p_count/box_area)*100 if box_area>0 else 0
 
-        # [RECHECK 조건] 주황색이 너무 적으면 리체크, 단 점수가 높으면 오염 인정
-        mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3,3), np.uint8), iterations=1)
-        mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
-        
-        b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
-        
-        # [SMART LOGIC 복구] 과노출(Saturated) 영역 독립 판별
-        # Green, Blue가 높고(>200) Red도 높은(>200) = 반사광(Glare) -> 0점
-        # Green, Blue가 높은데 Red는 낮은(<200) = 진짜 형광(Saturated Cyan) -> 감점 완화
-        is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
-        is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
-        
-        # 강도 계산: Saturated일 때는 R 페널티를 0.8로 낮춤 (점수 보존)
-        intensity_raw = np.where(is_glare, 0, np.where(is_saturated_cyan, ((g_ch + b_ch)/2.0 - r_ch*0.8), ((g_ch + b_ch)/2.0 - r_ch*1.7)))
-        intensity_map = np.clip(intensity_raw, 0, 100)
-        
-        # 과노출 픽셀 수 카운트 (점수 보완용)
-        mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
-        saturated_pixels = np.sum(mask_saturated_valid > 0)
-
-        cyan_area = (np.sum(mask_cyan>0)/p_count*100) if p_count>0 else 0
-        avg_int = np.mean(intensity_map[mask_cyan>0]) if np.sum(mask_cyan>0)>0 else 0
-        phi = cyan_area * (avg_int / 10.0)
-        
-        # [최종 판정] 점수가 5.0 넘거나, 과노출 픽셀이 20개 이상이면 무조건 오염!
-        if (p_count < 100 or orange_area_pct < 3.0) and phi < 5.0:
-             status = "RECHECK REQUIRED"
-             cv_color = (0, 165, 255)
-             phi = 0; cyan_area = 0
+        if p_count < 100 or orange_area_pct < 3.0:
+            status = "RECHECK REQUIRED"; cv_color = (0, 165, 255); phi = 0; cyan_area = 0
         else:
-            status = "CONTAMINATED" if (phi > 5.0 or saturated_pixels > 20) else "SAFE"
-            if status == "CONTAMINATED" and phi < 5.0: phi = 99.9 # 강제 오염 표식
+            # [수정] Containment Zone 확장 (5x5 커널, 반복 3회 -> 범위 대폭 증가)
+            # 주황색이 조금이라도 보이면 그 주변 넓은 영역을 '유효 반응 구역'으로 인정
+            mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((5,5), np.uint8), iterations=3)
+            mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
+            
+            b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
+            intensity_raw = np.where((g_ch>200)&(b_ch>200)&(r_ch>200), 0, np.where((g_ch>200)&(b_ch>200)&(r_ch<200), ((g_ch+b_ch)/2.0-r_ch*0.8), ((g_ch+b_ch)/2.0-r_ch*1.7)))
+            cyan_area = (np.sum(mask_cyan>0)/p_count*100) if p_count>0 else 0
+            avg_int = np.mean(np.clip(intensity_raw,0,100)[mask_cyan>0]) if np.sum(mask_cyan>0)>0 else 0
+            phi = cyan_area * (avg_int / 10.0)
+            
+            status = "CONTAMINATED" if (phi > 5.0 or np.sum((mask_cyan>0) & ((g_ch>200)&(b_ch>200)&(r_ch<200)).astype(np.uint8))>0) else "SAFE"
+            if status == "CONTAMINATED" and phi < 5.0: phi = 99.9
             cv_color = (255, 255, 0) if status == "CONTAMINATED" else (0, 255, 0)
 
         cv2.rectangle(draw_img, (nx1, ny1), (nx2, ny2), cv_color, 4)
@@ -172,7 +158,7 @@ def process_frame(img):
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
     return draw_img, reports
 
-# --- UI (Safe Mode - No Canvas Lib) ---
+# --- UI (Safe Mode) ---
 if 'admin_mode' not in st.session_state: st.session_state['admin_mode'] = False
 st.sidebar.title("메뉴")
 mode = st.sidebar.radio("이동", ["실시간 분석", "관리자 모드"])
@@ -192,9 +178,11 @@ if mode == "관리자 모드":
         current_idx = log_files.index(st.session_state.current_log_file)
         c1, c2, c3 = st.columns([1,4,1])
         with c1: 
-            if st.button("◀️"): st.session_state.current_log_file = log_files[max(0, current_idx-1)]; st.rerun()
+            if st.button("◀️ PREV", use_container_width=True):
+                st.session_state.current_log_file = log_files[max(0, current_idx - 1)]; st.rerun()
         with c3:
-            if st.button("▶️"): st.session_state.current_log_file = log_files[min(len(log_files)-1, current_idx+1)]; st.rerun()
+            if st.button("NEXT ▶️", use_container_width=True):
+                st.session_state.current_log_file = log_files[min(len(log_files)-1, current_idx + 1)]; st.rerun()
         with c2:
             def update_index():
                 st.session_state.current_log_file = st.session_state.log_selector
@@ -213,29 +201,37 @@ if mode == "관리자 모드":
                 img_bgr = cv2.imread(img_path)
                 img_rgb = cv2.cvtColor(apply_gamma_correction(img_bgr, gamma=0.8), cv2.COLOR_BGR2RGB)
                 
-                # [관리자 모드 텍스트 그리기 - 상태 표시]
                 draw_img = img_rgb.copy()
                 particles = data.get('particles', data.get('reports', []))
                 
+                init_objs = []
                 if particles:
                     for idx, p in enumerate(particles):
                         if 'box' not in p: continue
                         x1,y1,x2,y2 = p['box']
                         status = p.get('status', 'SAFE')
                         
-                        color = (0, 255, 0) # Green
-                        if status == "CONTAMINATED": color = (255, 0, 0)
-                        elif status == "RECHECK REQUIRED": color = (255, 165, 0)
+                        color = (0, 255, 0) # Green (SAFE)
+                        if status == "CONTAMINATED": color = (255, 0, 0) # Red
+                        elif status == "RECHECK REQUIRED": color = (255, 165, 0) # Orange
                         
                         cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
                         label_text = f"Area {idx + 1}: {status[:4]}"
                         if status == "RECHECK REQUIRED": label_text = f"Area {idx + 1}: RECHECK"
                         cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+                        
+                        # Canvas 초기값
+                        hex_color = "#00FF00" if status == "SAFE" else "#FF0000" if status == "CONTAMINATED" else "#FFA500"
+                        init_objs.append({
+                            "type": "rect", "left": x1, "top": y1, "width": x2-x1, "height": y2-y1, 
+                            "stroke": hex_color, "strokeWidth": 4, 
+                            "fill": "rgba(0,0,0,0)"
+                        })
                     
                     st.image(draw_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", use_container_width=True)
                     
-                    # [슬라이더 방식 수동 추가 복구]
-                    with st.expander("➕ 수동 영역 지정 (AI 미검출 시 사용)", expanded=False):
+                    with st.expander("➕ 수동 영역 지정 (Manual Selection)", expanded=False):
+                        st.info("AI가 놓친 입자를 수동으로 추가합니다.")
                         h, w = img_rgb.shape[:2]
                         mc1, mc2 = st.columns(2)
                         with mc1:
@@ -249,7 +245,7 @@ if mode == "관리자 모드":
                         cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
                         st.image(preview, caption="영역 미리보기", width=300)
                         
-                        if st.button("✅ 영역 추가하기"):
+                        if st.button("✅ 추가하기"):
                             if mx1 >= mx2 or my1 >= my2:
                                 st.error("범위 오류")
                             else:
@@ -261,7 +257,6 @@ if mode == "관리자 모드":
                                 st.success("추가됨!")
                                 st.rerun()
 
-                    # 수정 폼
                     with st.form("update"):
                         new_parts = []
                         cols = st.columns(2)
