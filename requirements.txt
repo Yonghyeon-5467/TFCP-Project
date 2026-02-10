@@ -1,7 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
 streamlit==1.39.0
 opencv-python-headless
-ultralytics
 numpy<2
 pillow
-torch
+ultralytics
 streamlit-drawable-canvas
