@@ -4,3 +4,4 @@ ultralytics
 numpy
 pillow
 torch
+streamlit-drawable-canvas
