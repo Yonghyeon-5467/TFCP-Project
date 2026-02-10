@@ -148,7 +148,7 @@ def process_frame(img):
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
     return draw_img, reports
 
-# --- UI ---
+# --- UI (Safe Mode) ---
 if 'admin_mode' not in st.session_state: st.session_state['admin_mode'] = False
 st.sidebar.title("메뉴")
 mode = st.sidebar.radio("이동", ["실시간 분석", "관리자 모드"])
@@ -179,59 +179,99 @@ if mode == "관리자 모드":
             with open(log_path, 'r') as f: data = json.load(f)
             img_path = os.path.join(IMG_DIR, data['filename'])
             if os.path.exists(img_path):
-                img_bgr = cv2.imread(img_path)
-                img_rgb = cv2.cvtColor(apply_gamma_correction(img_bgr), cv2.COLOR_BGR2RGB)
-                
-                # [수정] PIL Image로 변환하여 안정적으로 표시
-                pil_image = Image.fromarray(img_rgb)
-                
-                particles = data.get('particles', [])
-                init_objs = []
-                for i, p in enumerate(particles):
-                    if 'box' not in p: continue
-                    x1,y1,x2,y2 = p['box']
-                    color = "#FF0000" if p.get('status')=="CONTAMINATED" else "#00FF00"
-                    if p.get('status')=="RECHECK REQUIRED": color = "#FFA500"
-                    init_objs.append({"type":"rect", "left":x1, "top":y1, "width":x2-x1, "height":y2-y1, "stroke":color, "strokeWidth":4, "fill":"rgba(0,0,0,0)"})
-                
-                canvas_res = st_canvas(fill_color="rgba(255,0,255,0.2)", stroke_width=4, stroke_color="#FF00FF", background_image=pil_image, update_streamlit=True, height=img_rgb.shape[0], width=img_rgb.shape[1], drawing_mode="rect", initial_drawing={"version":"4.4.0", "objects":init_objs}, key=f"canv_{data['timestamp']}")
-                
-                if canvas_res.json_data:
-                    objects = canvas_res.json_data["objects"]
-                    if len(objects) > len(particles):
-                        new_objs = objects[len(particles):]
-                        for obj in new_objs:
-                            x, y, w, h = int(obj['left']), int(obj['top']), int(obj['width']), int(obj['height'])
-                            particles.append({"id": len(particles), "box": [x, y, x+w, y+h], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True})
-                        data['particles'] = particles
-                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                        st.rerun()
+                # [수정] PIL을 이용한 안전한 이미지 로딩
+                # 1. 파일이 존재하는지 먼저 확인 (이미 함)
+                # 2. PIL Image로 열기 -> numpy 변환 (OpenCV 호환)
+                try:
+                    pil_image = Image.open(img_path).convert('RGB')
+                    img_raw = np.array(pil_image)
+                    
+                    # OpenCV 처리를 위해 RGB -> BGR 변환 (감마 보정 함수는 BGR 기대 가능성)
+                    # 하지만 apply_gamma_correction은 채널 무관하므로 그냥 둠
+                    # 단, st_canvas와 st.image는 RGB를 기대함
+                    
+                    # 감마 보정 적용
+                    img_corrected = apply_gamma_correction(img_raw, gamma=0.8)
+                    
+                    # 캔버스용 이미지 (RGB)
+                    canvas_bg = Image.fromarray(img_corrected)
 
-                with st.form("update"):
-                    new_parts = []
-                    cols = st.columns(2)
+                    # 기존 분석 박스 그리기용 이미지 (수정 전 상태 확인용)
+                    # img_corrected는 RGB 상태
+                    
+                    particles = data.get('particles', [])
+                    init_objs = []
+                    
+                    # Canvas 초기 객체 생성
                     for i, p in enumerate(particles):
-                        with cols[i%2]:
-                            stat = p.get('status','SAFE')
-                            st.write(f"**Area {i+1}**: {stat}")
-                            idx = ["SAFE","CONTAMINATED","RECHECK REQUIRED"].index(stat) if stat in ["SAFE","CONTAMINATED","RECHECK REQUIRED"] else 0
-                            new_stat = st.radio("상태", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
-                            p['status'] = new_stat
-                            new_parts.append(p)
-                    if st.form_submit_button("저장"):
-                        data['particles'] = new_parts
-                        data['reviewed'] = True
-                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                        st.success("저장됨")
-                        st.rerun()
-                
-                if st.button("📦 ZIP 다운로드"):
-                    shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
-                    with open("TFCP_Backup.zip", "rb") as fp:
-                        st.download_button("다운로드", fp, "TFCP_Backup.zip", "application/zip")
+                        if 'box' not in p: continue
+                        x1,y1,x2,y2 = p['box']
+                        color = "#00FF00" # Green
+                        if p.get('status')=="CONTAMINATED": color = "#FF0000"
+                        elif p.get('status')=="RECHECK REQUIRED": color = "#FFA500"
+                        init_objs.append({"type":"rect", "left":x1, "top":y1, "width":x2-x1, "height":y2-y1, "stroke":color, "strokeWidth":4, "fill":"rgba(0,0,0,0)"})
+                    
+                    st.write(f"### {data.get('timestamp','Unknown')}")
+                    
+                    # Canvas 표시
+                    canvas_res = st_canvas(
+                        fill_color="rgba(255,0,255,0.2)",
+                        stroke_width=4,
+                        stroke_color="#FF00FF",
+                        background_image=canvas_bg,
+                        update_streamlit=True,
+                        height=canvas_bg.height,
+                        width=canvas_bg.width,
+                        drawing_mode="rect",
+                        initial_drawing={"version":"4.4.0", "objects":init_objs},
+                        key=f"canv_{data['timestamp']}"
+                    )
+                    
+                    # 드로잉 처리 로직 (새 박스 추가 감지)
+                    if canvas_res.json_data:
+                        objects = canvas_res.json_data["objects"]
+                        if len(objects) > len(particles):
+                            new_objs = objects[len(particles):]
+                            for obj in new_objs:
+                                x, y, w, h = int(obj['left']), int(obj['top']), int(obj['width']), int(obj['height'])
+                                particles.append({"id": len(particles), "box": [x, y, x+w, y+h], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True})
+                            data['particles'] = particles
+                            with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                            st.rerun()
+                    
+                    # 수정 폼
+                    with st.form("update"):
+                        new_parts = []
+                        cols = st.columns(2)
+                        for i, p in enumerate(particles):
+                            with cols[i%2]:
+                                stat = p.get('status','SAFE')
+                                st.write(f"**Area {i+1}**: {stat}")
+                                idx = ["SAFE","CONTAMINATED","RECHECK REQUIRED"].index(stat) if stat in ["SAFE","CONTAMINATED","RECHECK REQUIRED"] else 0
+                                new_stat = st.radio("상태", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
+                                p['status'] = new_stat
+                                new_parts.append(p)
+                        if st.form_submit_button("저장"):
+                            data['particles'] = new_parts
+                            data['reports'] = new_parts
+                            data['reviewed'] = True
+                            with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                            st.success("저장됨")
+                            st.rerun()
 
-            else: st.error("이미지 없음")
-        except Exception as e: st.error(f"데이터 오류: {e}")
+                    if st.button("📦 ZIP 다운로드"):
+                        shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
+                        with open("TFCP_Backup.zip", "rb") as fp:
+                            st.download_button("다운로드", fp, "TFCP_Backup.zip", "application/zip")
+                
+                except Exception as e:
+                    st.error(f"이미지 처리 중 오류: {e}")
+                    st.warning("원본 이미지가 손상되었거나 지원하지 않는 형식일 수 있습니다.")
+
+            else: 
+                st.error(f"이미지 파일 누락: {img_name}")
+                st.warning("서버가 재부팅되어 이미지가 삭제되었을 수 있습니다. (새로 촬영 필요)")
+        except Exception as e: st.error(f"데이터 로드 오류: {e}")
 
 elif mode == "실시간 분석":
     st.title("🧪 TFCP 분석기")
@@ -248,17 +288,14 @@ elif mode == "실시간 분석":
         else:
             try:
                 res_img, reports = process_frame(image)
+                # 저장
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 fn = f"TFCP_{ts}"
                 cv2.imwrite(os.path.join(IMG_DIR, f"{fn}.jpg"), image)
                 with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
                     json.dump({"filename":f"{fn}.jpg", "timestamp":ts, "reports":reports, "reviewed":False}, f, indent=4)
                 
-                # [수정] OpenCV 이미지를 PIL로 변환해서 출력
-                res_rgb = cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB)
-                res_pil = Image.fromarray(res_rgb)
-                with c1: st.image(res_pil, caption="분석 완료", use_column_width=True)
-                
+                with c1: st.image(cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB), caption="분석 완료", use_column_width=True)
                 with c2:
                     if reports:
                         for r in reports:
