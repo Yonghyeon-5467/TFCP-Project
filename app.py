@@ -182,23 +182,79 @@ if mode == "관리자 모드":
                 img_bgr = cv2.imread(img_path)
                 img_rgb = cv2.cvtColor(apply_gamma_correction(img_bgr), cv2.COLOR_BGR2RGB)
                 
-                # Canvas
+                # [관리자 모드 텍스트 그리기]
+                draw_img_bg = img_rgb.copy()
                 particles = data.get('particles', [])
                 init_objs = []
+                
                 for i, p in enumerate(particles):
                     if 'box' not in p: continue
                     x1,y1,x2,y2 = p['box']
-                    color = "#FF0000" if p.get('status')=="CONTAMINATED" else "#00FF00"
-                    if p.get('status')=="RECHECK REQUIRED": color = "#FFA500"
-                    init_objs.append({"type":"rect", "left":x1, "top":y1, "width":x2-x1, "height":y2-y1, "stroke":color, "strokeWidth":4, "fill":"rgba(0,0,0,0)"})
+                    status = p.get('status','SAFE')
+                    
+                    # 색상 설정 (RGB)
+                    color_rgb = (0, 255, 0) # Green
+                    color_hex = "#00FF00"
+                    if status == "CONTAMINATED": 
+                        color_rgb = (255, 0, 0); color_hex = "#FF0000"
+                    elif status == "RECHECK REQUIRED": 
+                        color_rgb = (255, 165, 0); color_hex = "#FFA500"
+
+                    # 1. 배경 이미지에 텍스트와 박스 그리기 (시각화용)
+                    # cv2.putText는 이미지를 직접 수정함
+                    label_text = f"Area {i+1}: {status[:4]}"
+                    if status == "RECHECK REQUIRED": label_text = f"Area {i+1}: RECHECK"
+                    
+                    cv2.rectangle(draw_img_bg, (x1, y1), (x2, y2), color_rgb, 4)
+                    cv2.putText(draw_img_bg, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color_rgb, 2)
+                    
+                    # 2. Canvas 객체 생성 (편집용, 투명 박스)
+                    init_objs.append({
+                        "type": "rect", 
+                        "left": x1, "top": y1, "width": x2-x1, "height": y2-y1, 
+                        "stroke": color_hex, "strokeWidth": 3, 
+                        "fill": "rgba(0,0,0,0)"
+                    })
                 
-                # [수정됨] 이미지 표시 시 use_column_width 사용
-                canvas_res = st_canvas(fill_color="rgba(255,0,255,0.2)", stroke_width=4, stroke_color="#FF00FF", background_image=Image.fromarray(img_rgb), update_streamlit=True, height=img_rgb.shape[0], width=img_rgb.shape[1], drawing_mode="rect", initial_drawing={"version":"4.4.0", "objects":init_objs}, key=f"canv_{data['timestamp']}")
+                # 고유 키 생성 (데이터 변경 시 캔버스 리로드)
+                # 데이터의 내용을 해시화하여 키에 포함
+                data_hash = hash(str(particles))
+                canvas_key = f"canvas_{data['timestamp']}_{data_hash}"
+
+                # Canvas 로드 (배경에 텍스트가 이미 그려진 draw_img_bg 사용)
+                canvas_res = st_canvas(
+                    fill_color="rgba(255,0,255,0.2)", 
+                    stroke_width=3, 
+                    stroke_color="#FF00FF", 
+                    background_image=Image.fromarray(draw_img_bg), 
+                    update_streamlit=True, 
+                    height=img_rgb.shape[0], 
+                    width=img_rgb.shape[1], 
+                    drawing_mode="rect", 
+                    initial_drawing={"version":"4.4.0", "objects":init_objs}, 
+                    key=canvas_key
+                )
                 
+                # 드로잉 처리
                 if canvas_res.json_data:
                     objects = canvas_res.json_data["objects"]
-                    if len(objects) != len(particles): # 새로 그려진 경우
-                        pass 
+                    # 새 박스가 추가된 경우 처리 (기존 로직과 통합 필요)
+                    if len(objects) > len(particles):
+                        new_objs = objects[len(particles):]
+                        for obj in new_objs:
+                            # 새 입자 추가 로직
+                            x, y, w, h = int(obj['left']), int(obj['top']), int(obj['width']), int(obj['height'])
+                            particles.append({
+                                "id": len(particles),
+                                "box": [x, y, x+w, y+h],
+                                "status": "CONTAMINATED", # 기본값
+                                "phi": 0, "cyan": 0, "orange": 0, "manual": True
+                            })
+                        # 즉시 저장 및 리로드
+                        data['particles'] = particles
+                        data['reports'] = particles
+                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                        st.rerun()
                 
                 # 수정 폼
                 with st.form("update"):
@@ -207,7 +263,14 @@ if mode == "관리자 모드":
                     for i, p in enumerate(particles):
                         with cols[i%2]:
                             stat = p.get('status','SAFE')
-                            st.write(f"**Area {i+1}**: {stat}")
+                            
+                            # 텍스트 색상
+                            t_color = "green"
+                            if stat == "CONTAMINATED": t_color = "red"
+                            elif stat == "RECHECK REQUIRED": t_color = "orange"
+                            
+                            st.markdown(f"**Area {i+1}**: <span style='color:{t_color}'><b>{stat}</b></span>", unsafe_allow_html=True)
+                            
                             idx = ["SAFE","CONTAMINATED","RECHECK REQUIRED"].index(stat) if stat in ["SAFE","CONTAMINATED","RECHECK REQUIRED"] else 0
                             new_stat = st.radio("상태", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
                             p['status'] = new_stat
@@ -245,7 +308,6 @@ elif mode == "실시간 분석":
                 with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
                     json.dump({"filename":f"{fn}.jpg", "timestamp":ts, "reports":reports, "reviewed":False}, f, indent=4)
                 
-                # [수정됨] use_container_width -> use_column_width 로 변경 (호환성 확보)
                 with c1: st.image(cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB), caption="분석 완료", use_column_width=True)
                 with c2:
                     if reports:
