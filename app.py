@@ -337,6 +337,3 @@ elif mode == "실시간 분석":
                             st.markdown(f'<div style="border:2px solid {clr}; padding:5px; margin:5px; border-radius:5px;">ID {r["id"]}: <b>{r["status"]}</b><br>Phi: {r["phi"]}</div>', unsafe_allow_html=True)
                     else: st.warning("입자 없음")
             except Exception as e: st.error(f"오류: {e}")
-```
-
-이 코드로 `app.py`를 교체하시면, **v10.2.1의 로직**은 그대로 유지되면서 **삭제 기능**과 **화면 고정(800x600)** 기능이 적용됩니다. 이제 정말 원하시던 그 상태일 겁니다!
