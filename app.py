@@ -151,6 +151,7 @@ def process_frame(img):
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
             is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
             is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
+            
             mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
             saturated_pixels = np.sum(mask_saturated_valid > 0)
 
@@ -177,34 +178,23 @@ def process_frame(img):
 
     return draw_img, reports
 
-# --- [4] UI: 관리자 페이지 (Safe Guard 적용) ---
+# --- [4] UI: 관리자 페이지 ---
 def render_admin_page():
     st.title("🗂️ 연구 데이터 관리 센터")
     
-    # 꼬인 데이터 초기화 버튼
-    if st.button("⚠️ 모든 데이터 초기화 (주의: 삭제됨)"):
-        if os.path.exists(LOG_DIR):
-            shutil.rmtree(LOG_DIR)
-            os.makedirs(LOG_DIR)
-        st.success("데이터가 초기화되었습니다.")
-        st.rerun()
-
-    # 데이터 목록 로드
+    # 데이터 목록 표시
     log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
-    
     if not log_files:
-        st.warning("저장된 분석 데이터가 없습니다.")
+        st.warning("저장된 데이터가 없습니다.")
         return
 
-    st.write(f"총 **{len(log_files)}**개의 분석 기록이 있습니다.")
-    
     col_list, col_view = st.columns([1, 2])
     
     with col_list:
+        st.write(f"총 **{len(log_files)}**개의 기록")
         selected_log = st.selectbox("분석 기록 선택", log_files, index=0)
         
-        # 전체 데이터 다운로드 버튼
-        if st.button("📦 전체 데이터 백업 (ZIP)"):
+        if st.button("📦 전체 데이터 백업 (ZIP 다운로드)"):
             shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
             with open("TFCP_Backup.zip", "rb") as fp:
                 st.download_button(
@@ -218,44 +208,42 @@ def render_admin_page():
         if selected_log:
             log_path = os.path.join(LOG_DIR, selected_log)
             try:
-                with open(log_path, 'r') as f:
-                    data = json.load(f)
-            except json.JSONDecodeError:
-                st.error("손상된 로그 파일입니다.")
+                with open(log_path, 'r') as f: data = json.load(f)
+            except:
+                st.error("파일 오류")
                 return
             
             img_name = data.get('filename')
             img_path = os.path.join(IMG_DIR, img_name)
             
             if os.path.exists(img_path):
-                # 이미지 및 현재 상태 시각화
-                image = Image.open(img_path)
-                img_np = np.array(image)
-                draw_img = img_np.copy()
+                # [수정] 관리자 모드 시각화
+                image_raw = cv2.imread(img_path)
+                image_corrected = apply_gamma_correction(image_raw, gamma=0.8)
+                image_rgb = cv2.cvtColor(image_corrected, cv2.COLOR_BGR2RGB)
                 
-                # 입자가 없는 경우에 대한 방어 코드
-                particles = data.get('particles', [])
+                draw_img = image_rgb.copy()
+                # [버그 수정] 'particles' 키가 없으면 'reports' 키를 사용하도록 호환성 확보
+                particles = data.get('particles', data.get('reports', []))
                 
                 if particles:
                     for p in particles:
-                        # [Safe Guard] 좌표 데이터가 없을 경우 패스
                         if 'box' not in p: continue
-                        
                         x1, y1, x2, y2 = p['box']
                         status = p.get('status', 'SAFE')
                         
-                        # 색상 설정
-                        color = (255, 0, 0) # Red (기본값)
-                        if status == "CONTAMINATED": color = (255, 0, 0)
-                        elif status == "SAFE": color = (0, 255, 0)
-                        elif status == "RECHECK REQUIRED": color = (255, 165, 0)
+                        color = (0, 255, 0) # Green (SAFE)
+                        if status == "CONTAMINATED": color = (255, 0, 0) # Red
+                        elif status == "RECHECK REQUIRED": color = (255, 165, 0) # Orange
                         
                         cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
-                        cv2.putText(draw_img, f"ID:{p['id']}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 3)
+                        
+                        label_text = f"ID:{p.get('id','?')} {status[:4]}"
+                        cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
                     
-                    st.image(draw_img, caption=f"File: {data['filename']}", use_container_width=True)
+                    st.image(draw_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", use_container_width=True)
                     
-                    # 데이터 수정 폼
+                    # 수정 폼
                     st.write("#### 📝 판정 결과 수정")
                     with st.form("correction_form"):
                         updated_particles = []
@@ -263,40 +251,36 @@ def render_admin_page():
                         
                         for i, p in enumerate(particles):
                             with cols[i % 2]:
-                                # [Safe Guard] .get()을 사용하여 없는 키에 대한 에러 방지
                                 status = p.get('status', 'SAFE')
-                                phi = p.get('phi', 0)
-                                cyan = p.get('cyan', 0)
-                                orange = p.get('orange', 0)
+                                st_color = "green" if status == "SAFE" else "red" if status == "CONTAMINATED" else "orange"
                                 
-                                st.info(f"**ID {p.get('id', i)}** (AI: {status})")
-                                st.caption(f"Phi: {phi} | Cyan: {cyan}% | Orange: {orange}%")
+                                st.markdown(f"**ID {p.get('id', i)}** : <span style='color:{st_color}'><b>{status}</b></span>", unsafe_allow_html=True)
                                 
                                 options = ["SAFE", "CONTAMINATED", "RECHECK REQUIRED"]
-                                # 현재 상태가 옵션에 없으면 기본값 SAFE로 설정 (오류 방지)
-                                try:
-                                    idx = options.index(status)
-                                except ValueError:
-                                    idx = 0
-                                    
+                                idx = options.index(status) if status in options else 0
+                                
                                 new_status = st.radio(
-                                    "Correct Status:",
+                                    "올바른 상태 선택:",
                                     options,
                                     index=idx,
-                                    key=f"p_{i}"
+                                    key=f"p_{i}",
+                                    horizontal=True
                                 )
                                 p['status'] = new_status
                                 updated_particles.append(p)
+                                st.write("---")
                         
-                        if st.form_submit_button("✅ 수정 사항 저장"):
-                            data['particles'] = updated_particles
+                        if st.form_submit_button("✅ 수정 사항 저장 (Save Corrections)"):
+                            # 저장 시 'reports' 키로 통일하여 저장
+                            data['reports'] = updated_particles 
+                            data['particles'] = updated_particles # 호환성 유지
                             data['reviewed'] = True
                             with open(log_path, 'w') as f:
                                 json.dump(data, f, indent=4)
                             st.success("데이터가 수정되었습니다!")
                             st.rerun()
                 else:
-                    st.image(image, caption=f"File: {data['filename']} (입자 없음)", use_container_width=True)
+                    st.image(image_rgb, caption="입자 없음")
                     st.warning("이 이미지에서는 감지된 입자가 없습니다.")
                     
             else:
@@ -306,7 +290,6 @@ def render_admin_page():
 if 'admin_mode' not in st.session_state:
     st.session_state['admin_mode'] = False
 
-# 사이드바
 st.sidebar.title("메뉴")
 mode = st.sidebar.radio("이동", ["실시간 분석", "관리자 모드"])
 
@@ -316,13 +299,16 @@ if mode == "관리자 모드":
         if pwd == "tfcp2026":
             st.session_state['admin_mode'] = True
             st.rerun()
-    else:
+        elif pwd:
+            st.error("비밀번호가 틀렸습니다.")
+    
+    if st.session_state['admin_mode']:
         render_admin_page()
 
 elif mode == "실시간 분석":
     st.title("🧪 TFCP 분석기")
     if model is None:
-        st.error("모델 파일(best.pt)이 없습니다.")
+        st.warning("⚠️ 모델 파일(best.pt)이 없습니다.")
     
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -334,10 +320,11 @@ elif mode == "실시간 분석":
         image = cv2.imdecode(file_bytes, 1)
         result_img, reports = process_frame(image)
         
-        # 자동 저장
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         save_name = f"TFCP_{timestamp}"
         cv2.imwrite(os.path.join(IMG_DIR, f"{save_name}.jpg"), image)
+        
+        # [핵심] 저장 시 'reports' 키 사용
         with open(os.path.join(LOG_DIR, f"{save_name}.json"), "w") as f:
             json.dump({"filename": f"{save_name}.jpg", "timestamp": timestamp, "reports": reports, "reviewed": False}, f, indent=4)
             
