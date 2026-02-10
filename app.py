@@ -8,11 +8,11 @@ import json
 import shutil
 from datetime import datetime
 import pandas as pd
-from streamlit_drawable_canvas import st_canvas
 
 # --- [1] 페이지 및 기본 설정 ---
 st.set_page_config(page_title="TFCP Data Manager", page_icon="🧪", layout="wide")
 
+# 저장소 경로 설정
 SAVE_ROOT = "TFCP_Data"
 IMG_DIR = os.path.join(SAVE_ROOT, "raw_images")
 LOG_DIR = os.path.join(SAVE_ROOT, "analysis_logs")
@@ -29,7 +29,7 @@ def load_model():
 
 model = load_model()
 
-# --- [3] 분석 엔진 (v12.5 Orange Expansion) ---
+# --- [3] 핵심 분석 엔진 (v12.5 Orange Expansion) ---
 
 def apply_gamma_correction(image, gamma=0.8):
     invGamma = 1.0 / gamma
@@ -83,7 +83,8 @@ def detect_particles_heuristically(img):
     for cnt in contours:
         if cv2.contourArea(cnt) > 3000:
             x, y, w, h = cv2.boundingRect(cnt)
-            if 0.2 < float(w)/h < 5.0:
+            aspect_ratio = float(w)/h if h>0 else 0
+            if 0.2 < aspect_ratio < 5.0:
                 found_boxes.append(FakeBox([x, y, x+w, y+h]))
     return found_boxes
 
@@ -136,8 +137,7 @@ def process_frame(img):
         if p_count < 100 or orange_area_pct < 3.0:
             status = "RECHECK REQUIRED"; cv_color = (0, 165, 255); phi = 0; cyan_area = 0
         else:
-            # [수정] Containment Zone 확장 (5x5 커널, 반복 3회 -> 범위 대폭 증가)
-            # 주황색이 조금이라도 보이면 그 주변 넓은 영역을 '유효 반응 구역'으로 인정
+            # [수정] Containment Zone 확장
             mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((5,5), np.uint8), iterations=3)
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
             
@@ -158,7 +158,7 @@ def process_frame(img):
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
     return draw_img, reports
 
-# --- UI (Safe Mode) ---
+# --- UI (Safe Mode - No Canvas Lib) ---
 if 'admin_mode' not in st.session_state: st.session_state['admin_mode'] = False
 st.sidebar.title("메뉴")
 mode = st.sidebar.radio("이동", ["실시간 분석", "관리자 모드"])
@@ -199,12 +199,14 @@ if mode == "관리자 모드":
             img_path = os.path.join(IMG_DIR, data['filename'])
             if os.path.exists(img_path):
                 img_bgr = cv2.imread(img_path)
-                img_rgb = cv2.cvtColor(apply_gamma_correction(img_bgr, gamma=0.8), cv2.COLOR_BGR2RGB)
+                # 감마 보정 적용
+                img_corrected = apply_gamma_correction(img_bgr, gamma=0.8)
+                img_rgb = cv2.cvtColor(img_corrected, cv2.COLOR_BGR2RGB)
                 
+                # 이미지 그리기
                 draw_img = img_rgb.copy()
                 particles = data.get('particles', data.get('reports', []))
                 
-                init_objs = []
                 if particles:
                     for idx, p in enumerate(particles):
                         if 'box' not in p: continue
@@ -219,17 +221,10 @@ if mode == "관리자 모드":
                         label_text = f"Area {idx + 1}: {status[:4]}"
                         if status == "RECHECK REQUIRED": label_text = f"Area {idx + 1}: RECHECK"
                         cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-                        
-                        # Canvas 초기값
-                        hex_color = "#00FF00" if status == "SAFE" else "#FF0000" if status == "CONTAMINATED" else "#FFA500"
-                        init_objs.append({
-                            "type": "rect", "left": x1, "top": y1, "width": x2-x1, "height": y2-y1, 
-                            "stroke": hex_color, "strokeWidth": 4, 
-                            "fill": "rgba(0,0,0,0)"
-                        })
                     
-                    st.image(draw_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", use_container_width=True)
-                    
+                    st.image(draw_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", use_column_width=True)
+
+                    # [수동 영역 지정 - 슬라이더 방식 복구]
                     with st.expander("➕ 수동 영역 지정 (Manual Selection)", expanded=False):
                         st.info("AI가 놓친 입자를 수동으로 추가합니다.")
                         h, w = img_rgb.shape[:2]
@@ -249,7 +244,11 @@ if mode == "관리자 모드":
                             if mx1 >= mx2 or my1 >= my2:
                                 st.error("범위 오류")
                             else:
-                                new_particle = {"id": len(particles), "box": [mx1, my1, mx2, my2], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True}
+                                new_particle = {
+                                    "id": len(particles),
+                                    "box": [mx1, my1, mx2, my2],
+                                    "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True
+                                }
                                 particles.append(new_particle)
                                 data['particles'] = particles
                                 data['reports'] = particles
@@ -257,6 +256,7 @@ if mode == "관리자 모드":
                                 st.success("추가됨!")
                                 st.rerun()
 
+                    # 수정 폼
                     with st.form("update"):
                         new_parts = []
                         cols = st.columns(2)
@@ -267,6 +267,7 @@ if mode == "관리자 모드":
                                 idx = ["SAFE","CONTAMINATED","RECHECK REQUIRED"].index(stat) if stat in ["SAFE","CONTAMINATED","RECHECK REQUIRED"] else 0
                                 new_stat = st.radio("상태", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
                                 p['status'] = new_stat
+                                # ID 재정렬
                                 p['id'] = i
                                 new_parts.append(p)
                         if st.form_submit_button("저장"):
