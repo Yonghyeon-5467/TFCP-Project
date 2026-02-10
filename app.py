@@ -151,6 +151,7 @@ def process_frame(img):
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
             is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
             is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
+            
             mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
             saturated_pixels = np.sum(mask_saturated_valid > 0)
 
@@ -182,49 +183,53 @@ def process_frame(img):
 def render_admin_page():
     st.title("🗂️ 연구 데이터 관리 센터")
     
-    # [네비게이션 1] 데이터 인덱스 관리 (세션 상태)
-    if 'log_index' not in st.session_state:
-        st.session_state.log_index = 0
-
+    # 데이터 목록 로드
     log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
     if not log_files:
         st.warning("저장된 데이터가 없습니다.")
         return
-    
-    # 인덱스 범위 보호
-    if st.session_state.log_index >= len(log_files):
-        st.session_state.log_index = 0
-    elif st.session_state.log_index < 0:
-        st.session_state.log_index = len(log_files) - 1
 
-    current_file = log_files[st.session_state.log_index]
+    # [수정] 현재 보고 있는 파일명 기반으로 상태 관리 (Index 대신 Filename 사용)
+    # 이렇게 하면 리스트가 바뀌거나 새로고침되어도 보던 파일을 유지합니다.
+    if 'current_log_file' not in st.session_state:
+        st.session_state.current_log_file = log_files[0]
+    
+    # 현재 파일이 목록에 없으면(삭제 등) 첫 번째로 리셋
+    if st.session_state.current_log_file not in log_files:
+        st.session_state.current_log_file = log_files[0]
+
+    current_idx = log_files.index(st.session_state.current_log_file)
 
     col_list, col_view = st.columns([1, 2])
     
     with col_list:
-        st.write(f"총 **{len(log_files)}**개의 기록 중 **{st.session_state.log_index + 1}**번째")
+        st.write(f"총 **{len(log_files)}**개의 기록 중 **{current_idx + 1}**번째")
         
-        # [네비게이션 2] 이전/다음 버튼
+        # 네비게이션 버튼
         c_prev, c_curr, c_next = st.columns([1, 2, 1])
         if c_prev.button("◀️", use_container_width=True):
-            st.session_state.log_index -= 1
+            new_idx = max(0, current_idx - 1)
+            st.session_state.current_log_file = log_files[new_idx]
             st.rerun()
+        
         if c_next.button("▶️", use_container_width=True):
-            st.session_state.log_index += 1
+            new_idx = min(len(log_files) - 1, current_idx + 1)
+            st.session_state.current_log_file = log_files[new_idx]
             st.rerun()
             
-        # 선택 박스 (동기화)
-        def update_index():
-            st.session_state.log_index = log_files.index(st.session_state.selected_log_box)
-            
-        st.selectbox(
+        # 선택 박스 (파일명 동기화)
+        selected_log = st.selectbox(
             "목록에서 바로 가기", 
             log_files, 
-            index=st.session_state.log_index,
-            key='selected_log_box',
-            on_change=update_index
+            index=current_idx,
+            key='log_selector'
         )
         
+        # 선택 박스를 바꾸면 상태 업데이트
+        if selected_log != st.session_state.current_log_file:
+            st.session_state.current_log_file = selected_log
+            st.rerun()
+
         st.divider()
         if st.button("📦 전체 데이터 백업 (ZIP)"):
             shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
@@ -232,7 +237,7 @@ def render_admin_page():
                 st.download_button("📥 다운로드 시작", fp, "TFCP_Backup.zip", "application/zip")
 
     with col_view:
-        log_path = os.path.join(LOG_DIR, current_file)
+        log_path = os.path.join(LOG_DIR, st.session_state.current_log_file)
         try:
             with open(log_path, 'r') as f: data = json.load(f)
         except:
@@ -250,14 +255,13 @@ def render_admin_page():
             
             particles = data.get('particles', data.get('reports', []))
             
-            # [이미지 그리기]
             if particles:
                 for idx, p in enumerate(particles):
                     if 'box' not in p: continue
                     x1, y1, x2, y2 = p['box']
                     status = p.get('status', 'SAFE')
                     
-                    color = (0, 255, 0) 
+                    color = (0, 255, 0) # Green
                     if status == "CONTAMINATED": color = (255, 0, 0)
                     elif status == "RECHECK REQUIRED": color = (255, 165, 0)
                     
@@ -268,11 +272,9 @@ def render_admin_page():
             
             st.image(draw_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", use_container_width=True)
             
-            # [수동 영역 지정 기능]
+            # [수정] 수동 영역 추가 시 현재 파일 유지
             with st.expander("➕ 수동 영역 지정 및 추가 (Manual Selection)", expanded=False):
-                st.info("AI가 놓친 입자가 있다면, 아래 슬라이더로 영역을 지정하고 추가하세요.")
                 h, w = img_np = image_rgb.shape[:2]
-                
                 mc1, mc2 = st.columns(2)
                 with mc1:
                     mx1 = st.slider("X 시작 (좌)", 0, w, int(w*0.3), key="mx1")
@@ -281,14 +283,13 @@ def render_admin_page():
                     my1 = st.slider("Y 시작 (상)", 0, h, int(h*0.3), key="my1")
                     my2 = st.slider("Y 끝 (하)", 0, h, int(h*0.7), key="my2")
                 
-                # 미리보기
                 preview = draw_img.copy()
                 cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
-                st.image(preview, caption="영역 미리보기 (보라색 박스)", width=300)
+                st.image(preview, caption="영역 미리보기", width=300)
                 
                 if st.button("✅ 이 영역을 'CONTAMINATED'로 추가"):
                     if mx1 >= mx2 or my1 >= my2:
-                        st.error("좌표 범위가 잘못되었습니다.")
+                        st.error("좌표 범위 오류")
                     else:
                         new_id = len(particles)
                         new_p = {
@@ -302,10 +303,9 @@ def render_admin_page():
                         # report와 particle 키 동기화
                         data['reports'] = particles
                         with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                        st.success("추가되었습니다! 아래 목록에서 상태를 최종 확인하세요.")
-                        st.rerun()
+                        st.success("추가되었습니다!")
+                        st.rerun() # 현재 상태 유지하며 리로드
 
-            # [수정 폼]
             if particles:
                 st.write("#### 📝 판정 결과 수정")
                 with st.form("correction_form"):
@@ -315,17 +315,15 @@ def render_admin_page():
                         with cols[i % 2]:
                             status = p.get('status', 'SAFE')
                             st_color = "green" if status == "SAFE" else "red" if status == "CONTAMINATED" else "orange"
-                            
                             st.markdown(f"**Area {i + 1}** : <span style='color:{st_color}'><b>{status}</b></span>", unsafe_allow_html=True)
                             
                             options = ["SAFE", "CONTAMINATED", "RECHECK REQUIRED"]
-                            try:
-                                idx = options.index(status)
+                            try: idx = options.index(status)
                             except: idx = 0
                             
                             new_status = st.radio("상태 변경:", options, index=idx, key=f"p_{i}", horizontal=True)
                             p['status'] = new_status
-                            # id값 재정렬 (혹시 모를 오류 방지)
+                            # id값 재정렬
                             p['id'] = i
                             updated_particles.append(p)
                             st.write("---")
@@ -336,11 +334,11 @@ def render_admin_page():
                         data['reviewed'] = True
                         with open(log_path, 'w') as f: json.dump(data, f, indent=4)
                         st.success("데이터가 수정되었습니다!")
-                        st.rerun()
+                        st.rerun() # 현재 상태 유지하며 리로드
             else:
-                st.warning("이 이미지에는 감지된 입자가 없습니다. 위 '수동 영역 지정'을 통해 추가해주세요.")
+                st.warning("입자가 없습니다. 위 메뉴에서 수동으로 추가하세요.")
         else:
-            st.error(f"이미지 원본을 찾을 수 없습니다: {img_name}")
+            st.error(f"이미지를 찾을 수 없습니다: {img_name}")
 
 # --- [메인 UI] ---
 if 'admin_mode' not in st.session_state:
