@@ -29,7 +29,7 @@ def load_model():
 
 model = load_model()
 
-# --- [3] 핵심 분석 엔진 (v10.2.1 로직) ---
+# --- [3] 핵심 분석 엔진 (v10.2.1 Logic) ---
 
 def apply_gamma_correction(image, gamma=0.8):
     invGamma = 1.0 / gamma
@@ -122,24 +122,50 @@ def process_frame(img):
         mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([60, 255, 255]))
         mask_cyan_candidate = cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
         
+        # 주황색 본체 정의
         mask_particle_body = np.zeros_like(mask_orange)
-        contours, _ = cv2.findContours(cv2.morphologyEx(mask_orange & (valid_mask.astype(np.uint8)*255), cv2.MORPH_CLOSE, np.ones((5,5), np.uint8)), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        p_count = sum(cv2.contourArea(cnt) for cnt in contours if cv2.contourArea(cnt) > 20)
+        closed_orange = cv2.morphologyEx(mask_orange & (valid_mask.astype(np.uint8)*255), cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
+        contours, _ = cv2.findContours(closed_orange, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        p_count = 0
+        for cnt in contours:
+            if cv2.contourArea(cnt) > 20:
+                cv2.drawContours(mask_particle_body, [cnt], -1, 255, -1)
+                p_count += cv2.contourArea(cnt)
         
         box_area = (nx2-nx1)*(ny2-ny1)
         orange_area_pct = (p_count/box_area)*100 if box_area>0 else 0
 
+        # [v10.2.1] 밀도 및 면적 미달 시 RECHECK REQUIRED
         if p_count < 100 or orange_area_pct < 3.0:
-            status = "RECHECK REQUIRED"; cv_color = (0, 165, 255); phi = 0; cyan_area = 0
+            status = "RECHECK REQUIRED"
+            cv_color = (0, 165, 255) # Orange BGR
+            phi = 0; cyan_area = 0
+            avg_int = 0
         else:
+            # 절대 포함 규칙 (Strict Containment)
             mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3,3), np.uint8), iterations=1)
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
+            
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
-            intensity_raw = np.where((g_ch>200)&(b_ch>200)&(r_ch>200), 0, np.where((g_ch>200)&(b_ch>200)&(r_ch<200), ((g_ch+b_ch)/2.0-r_ch*0.8), ((g_ch+b_ch)/2.0-r_ch*1.7)))
+            
+            # 과노출(Saturation) 보정 로직
+            is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
+            is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
+            
+            # 과노출 영역도 Containment Zone 안에 있어야 유효
+            mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
+            saturated_pixels = np.sum(mask_saturated_valid > 0)
+
+            intensity_raw = np.where(is_glare, 0, np.where(is_saturated_cyan, ((g_ch + b_ch)/2.0 - r_ch*0.8), ((g_ch + b_ch)/2.0 - r_ch*1.7)))
+            intensity_map = np.clip(intensity_raw, 0, 100)
+            
             cyan_area = (np.sum(mask_cyan>0)/p_count*100) if p_count>0 else 0
-            avg_int = np.mean(np.clip(intensity_raw,0,100)[mask_cyan>0]) if np.sum(mask_cyan>0)>0 else 0
+            avg_int = np.mean(intensity_map[mask_cyan>0]) if np.sum(mask_cyan>0)>0 else 0
             phi = cyan_area * (avg_int / 10.0)
-            status = "CONTAMINATED" if (phi > 5.0 or np.sum((mask_cyan>0) & ((g_ch>200)&(b_ch>200)&(r_ch<200)).astype(np.uint8))>0) else "SAFE"
+            
+            # 오염 판정
+            status = "CONTAMINATED" if (phi > 5.0 or saturated_pixels > 20) else "SAFE"
             if status == "CONTAMINATED" and phi < 5.0: phi = 99.9
             cv_color = (255, 255, 0) if status == "CONTAMINATED" else (0, 255, 0)
 
@@ -147,10 +173,15 @@ def process_frame(img):
         label_text = f"Area {i+1}: {status[:4]}" if status != "RECHECK REQUIRED" else f"Area {i+1}: RECHECK"
         cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, cv_color, 2)
         
-        reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
+        reports.append({
+            "id": i, "status": status, "phi": float(round(phi, 2)), 
+            "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)),
+            "box": [int(nx1), int(ny1), int(nx2), int(ny2)]
+        })
+
     return draw_img, reports
 
-# --- UI (Safe Mode - No Canvas Lib) ---
+# --- UI (Standard Mode) ---
 if 'admin_mode' not in st.session_state: st.session_state['admin_mode'] = False
 st.sidebar.title("메뉴")
 mode = st.sidebar.radio("이동", ["실시간 분석", "관리자 모드"])
@@ -164,7 +195,6 @@ if mode == "관리자 모드":
         log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
         if not log_files: st.warning("데이터 없음"); st.stop()
         
-        # 세션 상태로 현재 파일 유지
         if 'current_log_file' not in st.session_state or st.session_state.current_log_file not in log_files:
             st.session_state.current_log_file = log_files[0]
         
@@ -194,9 +224,8 @@ if mode == "관리자 모드":
                 img_bgr = cv2.imread(img_path)
                 img_corrected = apply_gamma_correction(img_bgr, gamma=0.8)
                 img_rgb = cv2.cvtColor(img_corrected, cv2.COLOR_BGR2RGB)
-                
-                # 그리기
                 draw_img = img_rgb.copy()
+                
                 particles = data.get('particles', data.get('reports', []))
                 
                 if particles:
@@ -205,7 +234,7 @@ if mode == "관리자 모드":
                         x1,y1,x2,y2 = p['box']
                         status = p.get('status', 'SAFE')
                         
-                        color = (0, 255, 0) # Green (SAFE)
+                        color = (0, 255, 0) # Green
                         if status == "CONTAMINATED": color = (255, 0, 0) # Red
                         elif status == "RECHECK REQUIRED": color = (255, 165, 0) # Orange
                         
@@ -273,6 +302,7 @@ if mode == "관리자 모드":
                          data['particles'] = [new_p]; data['reports'] = [new_p]
                          with open(log_path, 'w') as f: json.dump(data, f, indent=4)
                          st.rerun()
+
             else: st.error("이미지 없음")
         except Exception as e: st.error(f"데이터 오류: {e}")
 
