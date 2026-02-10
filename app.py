@@ -265,7 +265,7 @@ mode = st.sidebar.radio("이동", ["실시간 분석", "관리자 모드"])
 if mode == "관리자 모드":
     if not st.session_state['admin_mode']:
         pwd = st.sidebar.text_input("관리자 비밀번호", type="password")
-        if pwd == "tfcp2026":
+        if pwd == "yh5467":
             st.session_state['admin_mode'] = True
             st.rerun()
     else:
@@ -303,3 +303,4 @@ elif mode == "실시간 분석":
                     st.markdown(f'<div style="border:2px solid {c}; padding:5px; margin:5px; border-radius:5px;">ID {r["id"]}: <b>{r["status"]}</b><br>Phi: {r["phi"]}</div>', unsafe_allow_html=True)
             else:
                 st.warning("입자 없음")
+
