@@ -151,7 +151,6 @@ def process_frame(img):
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
             is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
             is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
-            
             mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
             saturated_pixels = np.sum(mask_saturated_valid > 0)
 
@@ -167,8 +166,13 @@ def process_frame(img):
             cv_color = (255, 255, 0) if status == "CONTAMINATED" else (0, 255, 0)
 
         cv2.rectangle(draw_img, (nx1, ny1), (nx2, ny2), cv_color, 4)
-        label_text = f"{status[:4]} P:{phi:.1f}"
-        cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, cv_color, 2)
+        
+        # [수정] 라벨 텍스트: "Area {순번}" 형식으로 변경
+        # 예: "Area 1 : SAFE"
+        label_text = f"Area {i+1} : {status[:4]}"
+        if status == "RECHECK REQUIRED": label_text = f"Area {i+1} : RECHECK"
+        
+        cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, cv_color, 3)
         
         reports.append({
             "id": i, "status": status, "phi": float(round(phi, 2)), 
@@ -182,7 +186,6 @@ def process_frame(img):
 def render_admin_page():
     st.title("🗂️ 연구 데이터 관리 센터")
     
-    # 데이터 목록 표시
     log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
     if not log_files:
         st.warning("저장된 데이터가 없습니다.")
@@ -197,12 +200,7 @@ def render_admin_page():
         if st.button("📦 전체 데이터 백업 (ZIP 다운로드)"):
             shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
             with open("TFCP_Backup.zip", "rb") as fp:
-                st.download_button(
-                    label="ZIP 다운로드 시작",
-                    data=fp,
-                    file_name="TFCP_Backup.zip",
-                    mime="application/zip"
-                )
+                st.download_button("ZIP 다운로드", fp, "TFCP_Backup.zip", "application/zip")
 
     with col_view:
         if selected_log:
@@ -217,13 +215,11 @@ def render_admin_page():
             img_path = os.path.join(IMG_DIR, img_name)
             
             if os.path.exists(img_path):
-                # [수정] 관리자 모드 시각화
                 image_raw = cv2.imread(img_path)
                 image_corrected = apply_gamma_correction(image_raw, gamma=0.8)
                 image_rgb = cv2.cvtColor(image_corrected, cv2.COLOR_BGR2RGB)
-                
                 draw_img = image_rgb.copy()
-                # [버그 수정] 'particles' 키가 없으면 'reports' 키를 사용하도록 호환성 확보
+                
                 particles = data.get('particles', data.get('reports', []))
                 
                 if particles:
@@ -231,6 +227,7 @@ def render_admin_page():
                         if 'box' not in p: continue
                         x1, y1, x2, y2 = p['box']
                         status = p.get('status', 'SAFE')
+                        p_id = p.get('id', 0)
                         
                         color = (0, 255, 0) # Green (SAFE)
                         if status == "CONTAMINATED": color = (255, 0, 0) # Red
@@ -238,23 +235,41 @@ def render_admin_page():
                         
                         cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
                         
-                        label_text = f"ID:{p.get('id','?')} {status[:4]}"
-                        cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                        # [수정] 관리자 모드 시각화: "Area {순번}" 형식 적용
+                        label_text = f"Area {p_id + 1} : {status[:4]}"
+                        if status == "RECHECK REQUIRED": label_text = f"Area {p_id + 1} : RECHECK"
+                        
+                        cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
                     
                     st.image(draw_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", use_container_width=True)
                     
-                    # 수정 폼
                     st.write("#### 📝 판정 결과 수정")
+                    
+                    if st.button("➕ 입자 강제 추가 (AI 미검출 시)"):
+                        h, w = draw_img.shape[:2]
+                        new_id = len(particles)
+                        new_particle = {
+                            "id": new_id,
+                            "box": [int(w*0.3), int(h*0.3), int(w*0.7), int(h*0.7)],
+                            "status": "CONTAMINATED", 
+                            "phi": 0, "cyan": 0, "orange": 0
+                        }
+                        particles.append(new_particle)
+                        data['particles'] = particles
+                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                        st.success("새로운 영역이 추가되었습니다.")
+                        st.rerun()
+
                     with st.form("correction_form"):
                         updated_particles = []
                         cols = st.columns(2)
-                        
                         for i, p in enumerate(particles):
                             with cols[i % 2]:
                                 status = p.get('status', 'SAFE')
                                 st_color = "green" if status == "SAFE" else "red" if status == "CONTAMINATED" else "orange"
                                 
-                                st.markdown(f"**ID {p.get('id', i)}** : <span style='color:{st_color}'><b>{status}</b></span>", unsafe_allow_html=True)
+                                # [수정] 수정 폼 라벨도 Area로 변경
+                                st.markdown(f"**Area {p.get('id', i) + 1}** : <span style='color:{st_color}'><b>{status}</b></span>", unsafe_allow_html=True)
                                 
                                 options = ["SAFE", "CONTAMINATED", "RECHECK REQUIRED"]
                                 idx = options.index(status) if status in options else 0
@@ -271,9 +286,8 @@ def render_admin_page():
                                 st.write("---")
                         
                         if st.form_submit_button("✅ 수정 사항 저장 (Save Corrections)"):
-                            # 저장 시 'reports' 키로 통일하여 저장
                             data['reports'] = updated_particles 
-                            data['particles'] = updated_particles # 호환성 유지
+                            data['particles'] = updated_particles
                             data['reviewed'] = True
                             with open(log_path, 'w') as f:
                                 json.dump(data, f, indent=4)
@@ -324,7 +338,6 @@ elif mode == "실시간 분석":
         save_name = f"TFCP_{timestamp}"
         cv2.imwrite(os.path.join(IMG_DIR, f"{save_name}.jpg"), image)
         
-        # [핵심] 저장 시 'reports' 키 사용
         with open(os.path.join(LOG_DIR, f"{save_name}.json"), "w") as f:
             json.dump({"filename": f"{save_name}.jpg", "timestamp": timestamp, "reports": reports, "reviewed": False}, f, indent=4)
             
@@ -335,6 +348,7 @@ elif mode == "실시간 분석":
             if reports:
                 for r in reports:
                     c = "red" if r['status']=="CONTAMINATED" else "green" if r['status']=="SAFE" else "orange"
-                    st.markdown(f'<div style="border:2px solid {c}; padding:5px; margin:5px; border-radius:5px;">ID {r["id"]}: <b>{r["status"]}</b><br>Phi: {r["phi"]}</div>', unsafe_allow_html=True)
+                    # [수정] 결과창에도 Area 표시
+                    st.markdown(f'<div style="border:2px solid {c}; padding:5px; margin:5px; border-radius:5px;">Area {r["id"]+1}: <b>{r["status"]}</b><br>Phi: {r["phi"]}</div>', unsafe_allow_html=True)
             else:
                 st.warning("입자 없음")
