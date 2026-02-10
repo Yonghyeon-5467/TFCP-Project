@@ -81,7 +81,8 @@ def detect_particles_heuristically(img):
     for cnt in contours:
         if cv2.contourArea(cnt) > 3000:
             x, y, w, h = cv2.boundingRect(cnt)
-            if 0.2 < float(w)/h < 5.0:
+            aspect_ratio = float(w)/h if h>0 else 0
+            if 0.2 < aspect_ratio < 5.0:
                 found_boxes.append(FakeBox([x, y, x+w, y+h]))
     return found_boxes
 
@@ -179,63 +180,71 @@ if mode == "관리자 모드":
             with open(log_path, 'r') as f: data = json.load(f)
             img_path = os.path.join(IMG_DIR, data['filename'])
             if os.path.exists(img_path):
-                # [수정] PIL을 이용한 안전한 이미지 로딩
-                # 1. 파일이 존재하는지 먼저 확인 (이미 함)
-                # 2. PIL Image로 열기 -> numpy 변환 (OpenCV 호환)
-                try:
-                    pil_image = Image.open(img_path).convert('RGB')
-                    img_raw = np.array(pil_image)
+                # [수정] OpenCV로 로드하여 확실하게 처리 후 PIL 변환
+                img_bgr = cv2.imread(img_path)
+                if img_bgr is not None:
+                    # 감마 보정 적용 (실시간 분석 때와 동일한 밝기 유지)
+                    img_corrected = apply_gamma_correction(img_bgr, gamma=0.8)
+                    # BGR -> RGB 변환
+                    img_rgb = cv2.cvtColor(img_corrected, cv2.COLOR_BGR2RGB)
                     
-                    # OpenCV 처리를 위해 RGB -> BGR 변환 (감마 보정 함수는 BGR 기대 가능성)
-                    # 하지만 apply_gamma_correction은 채널 무관하므로 그냥 둠
-                    # 단, st_canvas와 st.image는 RGB를 기대함
-                    
-                    # 감마 보정 적용
-                    img_corrected = apply_gamma_correction(img_raw, gamma=0.8)
-                    
-                    # 캔버스용 이미지 (RGB)
-                    canvas_bg = Image.fromarray(img_corrected)
-
-                    # 기존 분석 박스 그리기용 이미지 (수정 전 상태 확인용)
-                    # img_corrected는 RGB 상태
+                    # Canvas용 배경 이미지 생성
+                    canvas_bg = Image.fromarray(img_rgb)
                     
                     particles = data.get('particles', [])
                     init_objs = []
                     
-                    # Canvas 초기 객체 생성
+                    # 기존 박스들 그리기
                     for i, p in enumerate(particles):
                         if 'box' not in p: continue
                         x1,y1,x2,y2 = p['box']
-                        color = "#00FF00" # Green
-                        if p.get('status')=="CONTAMINATED": color = "#FF0000"
-                        elif p.get('status')=="RECHECK REQUIRED": color = "#FFA500"
-                        init_objs.append({"type":"rect", "left":x1, "top":y1, "width":x2-x1, "height":y2-y1, "stroke":color, "strokeWidth":4, "fill":"rgba(0,0,0,0)"})
+                        color = "#00FF00" # Green (SAFE)
+                        if p.get('status')=="CONTAMINATED": color = "#FF0000" # Red
+                        elif p.get('status')=="RECHECK REQUIRED": color = "#FFA500" # Orange
+                        
+                        init_objs.append({
+                            "type": "rect", 
+                            "left": x1, 
+                            "top": y1, 
+                            "width": x2-x1, 
+                            "height": y2-y1, 
+                            "stroke": color, 
+                            "strokeWidth": 4, 
+                            "fill": "rgba(0,0,0,0)"
+                        })
                     
                     st.write(f"### {data.get('timestamp','Unknown')}")
                     
-                    # Canvas 표시
+                    # [핵심] st_canvas 로드 (드래그 가능)
                     canvas_res = st_canvas(
                         fill_color="rgba(255,0,255,0.2)",
                         stroke_width=4,
                         stroke_color="#FF00FF",
                         background_image=canvas_bg,
                         update_streamlit=True,
-                        height=canvas_bg.height,
-                        width=canvas_bg.width,
+                        height=img_rgb.shape[0],
+                        width=img_rgb.shape[1],
                         drawing_mode="rect",
                         initial_drawing={"version":"4.4.0", "objects":init_objs},
                         key=f"canv_{data['timestamp']}"
                     )
                     
-                    # 드로잉 처리 로직 (새 박스 추가 감지)
+                    # 새 박스 추가 감지 로직
                     if canvas_res.json_data:
                         objects = canvas_res.json_data["objects"]
+                        # 기존 박스 개수보다 많아지면 새로 추가된 것으로 간주
                         if len(objects) > len(particles):
                             new_objs = objects[len(particles):]
                             for obj in new_objs:
                                 x, y, w, h = int(obj['left']), int(obj['top']), int(obj['width']), int(obj['height'])
-                                particles.append({"id": len(particles), "box": [x, y, x+w, y+h], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True})
+                                particles.append({
+                                    "id": len(particles), 
+                                    "box": [x, y, x+w, y+h], 
+                                    "status": "CONTAMINATED", 
+                                    "phi": 0, "cyan": 0, "orange": 0, "manual": True
+                                })
                             data['particles'] = particles
+                            data['reports'] = particles
                             with open(log_path, 'w') as f: json.dump(data, f, indent=4)
                             st.rerun()
                     
@@ -263,15 +272,11 @@ if mode == "관리자 모드":
                         shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
                         with open("TFCP_Backup.zip", "rb") as fp:
                             st.download_button("다운로드", fp, "TFCP_Backup.zip", "application/zip")
-                
-                except Exception as e:
-                    st.error(f"이미지 처리 중 오류: {e}")
-                    st.warning("원본 이미지가 손상되었거나 지원하지 않는 형식일 수 있습니다.")
+                else:
+                    st.error(f"이미지 로드 실패: {img_path}")
 
-            else: 
-                st.error(f"이미지 파일 누락: {img_name}")
-                st.warning("서버가 재부팅되어 이미지가 삭제되었을 수 있습니다. (새로 촬영 필요)")
-        except Exception as e: st.error(f"데이터 로드 오류: {e}")
+            else: st.error("이미지 없음 (서버 재부팅으로 삭제됨)")
+        except Exception as e: st.error(f"데이터 오류: {e}")
 
 elif mode == "실시간 분석":
     st.title("🧪 TFCP 분석기")
@@ -295,6 +300,7 @@ elif mode == "실시간 분석":
                 with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
                     json.dump({"filename":f"{fn}.jpg", "timestamp":ts, "reports":reports, "reviewed":False}, f, indent=4)
                 
+                # 실시간 분석 화면에는 텍스트 정보 포함된 OpenCV 이미지 출력 (빠른 확인용)
                 with c1: st.image(cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB), caption="분석 완료", use_column_width=True)
                 with c2:
                     if reports:
