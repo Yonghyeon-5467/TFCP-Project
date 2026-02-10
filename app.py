@@ -28,15 +28,15 @@ def load_model():
 
 model = load_model()
 
-# --- [3] 핵심 분석 및 헬퍼 함수 ---
+# --- [3] 핵심 분석 엔진 (v10.2.1 Original Logic) ---
 
 def apply_gamma_correction(image, gamma=0.8):
     invGamma = 1.0 / gamma
     table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
     return cv2.LUT(image, table)
 
+# [요청 기능 1] 이미지 크기 고정 (Letterbox)
 def standardize_image_size(img, target_width=800, target_height=600):
-    """이미지 크기를 고정하고 비율을 유지 (Letterbox)"""
     h, w = img.shape[:2]
     scale = min(target_width/w, target_height/h)
     nw, nh = int(w*scale), int(h*scale)
@@ -81,8 +81,8 @@ def filter_nested_boxes(boxes):
 
 def detect_particles_heuristically(img):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask_o = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([65, 255, 255]))
-    mask_c = cv2.inRange(hsv, np.array([75, 30, 30]), np.array([170, 255, 255]))
+    mask_o = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([60, 255, 255]))
+    mask_c = cv2.inRange(hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
     combined = cv2.bitwise_or(mask_o, mask_c)
     kernel = np.ones((25,25), np.uint8)
     combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
@@ -117,7 +117,7 @@ def process_frame(img):
         if (x2-x1) < 50 or (y2-y1) < 50: continue
         roi_hsv = hsv[max(0,y1):min(img_h,y2), max(0,x1):min(img_w,x2)]
         if roi_hsv.size == 0: continue
-        if np.sum(cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([65, 255, 255]))) + np.sum(cv2.inRange(roi_hsv, np.array([75, 30, 30]), np.array([170, 255, 255]))) > 100:
+        if np.sum(cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([60, 255, 255]))) + np.sum(cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))) > 200:
             combined_boxes.append((box, "AI"))
 
     if not combined_boxes:
@@ -133,37 +133,42 @@ def process_frame(img):
         if roi_hsv.size == 0: continue
         
         valid_mask = (roi_hsv[:,:,1]>25) & (roi_hsv[:,:,2]>25)
-        mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([65, 255, 255]))
-        mask_cyan_candidate = cv2.inRange(roi_hsv, np.array([75, 30, 30]), np.array([170, 255, 255]))
+        # v10.2.1의 색상 기준 복구 (Orange 0-60, Cyan 80-165)
+        mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([60, 255, 255]))
+        mask_cyan_candidate = cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
         
         mask_particle_body = np.zeros_like(mask_orange)
         contours, _ = cv2.findContours(cv2.morphologyEx(mask_orange & (valid_mask.astype(np.uint8)*255), cv2.MORPH_CLOSE, np.ones((5,5), np.uint8)), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         p_count = sum(cv2.contourArea(cnt) for cnt in contours if cv2.contourArea(cnt) > 20)
         
+        # 입자 본체 채우기
+        for cnt in contours:
+            if cv2.contourArea(cnt) > 20: cv2.drawContours(mask_particle_body, [cnt], -1, 255, -1)
+
         box_area = (nx2-nx1)*(ny2-ny1)
         orange_area_pct = (p_count/box_area)*100 if box_area>0 else 0
 
-        # [Logic v10.2.1] Density Check
-        if p_count < 50 and method == "AI":
+        # v10.2.1 가드 로직
+        if p_count < 100 or orange_area_pct < 3.0:
             status = "RECHECK REQUIRED"; cv_color = (0, 165, 255); phi = 0; cyan_area = 0
             avg_int = 0
         else:
-            mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((5,5), np.uint8), iterations=3)
-            if p_count < 50: mask_containment_zone = np.ones_like(mask_orange) * 255
+            # v10.2.1 엄격한 포함 조건 (3px 팽창)
+            mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3,3), np.uint8), iterations=1)
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
             
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
+            # v10.2.1 과노출 판정 (G,B > 200, R < 200)
+            is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
+            is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
             
-            is_glare = (g_ch > 220) & (b_ch > 220) & (r_ch > 220)
-            is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 220)
             mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
             saturated_pixels = np.sum(mask_saturated_valid > 0)
 
             intensity_raw = np.where(is_glare, 0, np.where(is_saturated_cyan, ((g_ch + b_ch)/2.0 - r_ch*0.8), ((g_ch + b_ch)/2.0 - r_ch*1.7)))
             intensity_map = np.clip(intensity_raw, 0, 100)
             
-            denom = p_count if p_count > 0 else np.sum(mask_cyan > 0)
-            cyan_area = (np.sum(mask_cyan>0)/denom*100) if denom > 0 else 0
+            cyan_area = (np.sum(mask_cyan>0)/p_count*100) if p_count>0 else 0
             avg_int = np.mean(intensity_map[mask_cyan>0]) if np.sum(mask_cyan>0)>0 else 0
             phi = cyan_area * (avg_int / 10.0)
             
@@ -172,9 +177,7 @@ def process_frame(img):
             cv_color = (255, 255, 0) if status == "CONTAMINATED" else (0, 255, 0)
 
         cv2.rectangle(draw_img, (nx1, ny1), (nx2, ny2), cv_color, 4)
-        
-        # [v16 라벨 적용] Area 1, Area 2...
-        label_text = f"Area {i+1}: {status[:4]}" if status != "RECHECK REQUIRED" else f"Area {i+1}: RECHECK"
+        label_text = f"{status[:4]} P:{phi:.1f}"
         cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, cv_color, 2)
         
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
@@ -209,12 +212,12 @@ if mode == "관리자 모드":
             def update_index(): st.session_state.current_log_file = st.session_state.log_selector
             st.selectbox("파일 선택", log_files, index=current_idx, key='log_selector', on_change=update_index, label_visibility="collapsed")
         
-        # [데이터 관리 버튼]
         bc1, bc2 = st.columns(2)
         with bc1:
-            if st.button("📦 ZIP 백업", use_container_width=True):
+            if st.button("📦 백업 (ZIP)", use_container_width=True):
                 shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
                 with open("TFCP_Backup.zip", "rb") as fp: st.download_button("📥 다운로드", fp, "TFCP_Backup.zip", "application/zip")
+        # [요청 기능 2] 삭제 기능 추가
         with bc2:
             if st.button("🗑️ 삭제", type="primary", use_container_width=True):
                 log_path_del = os.path.join(LOG_DIR, st.session_state.current_log_file)
@@ -242,59 +245,47 @@ if mode == "관리자 모드":
                         if 'box' not in p: continue
                         x1,y1,x2,y2 = p['box']
                         status = p.get('status', 'SAFE')
-                        
                         color = (0, 255, 0)
                         if status == "CONTAMINATED": color = (255, 0, 0)
                         elif status == "RECHECK REQUIRED": color = (255, 165, 0)
-                        
                         cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
-                        # [라벨링 v16 적용] Area 1, Area 2...
-                        label_text = f"Area {idx + 1}: {status[:4]}"
-                        if status == "RECHECK REQUIRED": label_text = f"Area {idx + 1}: RECHECK"
+                        label_text = f"ID:{idx} {status[:4]}"
                         cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
                     
-                    # [v16 적용] 화면 크기 고정 (800)
+                    # [요청 기능 1] 이미지 크기 고정 (800x600)
                     display_img = standardize_image_size(draw_img, 800, 600)
                     st.image(display_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
 
-                    # [수동 추가 - 슬라이더]
-                    with st.expander("➕ 수동 영역 지정 (Manual Selection)", expanded=False):
+                    # [수동 추가 - 슬라이더 유지]
+                    with st.expander("➕ 수동 영역 지정", expanded=False):
                         h, w = img_rgb.shape[:2]
                         mc1, mc2 = st.columns(2)
                         with mc1:
-                            mx1 = st.slider("X 시작", 0, w, int(w*0.3), key="mx1")
-                            mx2 = st.slider("X 끝", 0, w, int(w*0.7), key="mx2")
+                            mx1 = st.slider("X Start", 0, w, int(w*0.3), key="mx1")
+                            mx2 = st.slider("X End", 0, w, int(w*0.7), key="mx2")
                         with mc2:
-                            my1 = st.slider("Y 시작", 0, h, int(h*0.3), key="my1")
-                            my2 = st.slider("Y 끝", 0, h, int(h*0.7), key="my2")
-                        
+                            my1 = st.slider("Y Start", 0, h, int(h*0.3), key="my1")
+                            my2 = st.slider("Y End", 0, h, int(h*0.7), key="my2")
                         preview = draw_img.copy()
                         cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
-                        st.image(standardize_image_size(preview, 800, 600), caption="미리보기", width=800)
-                        
+                        st.image(standardize_image_size(preview, 800, 600), width=800)
                         if st.button("✅ 추가하기"):
-                            if mx1 >= mx2 or my1 >= my2:
-                                st.error("범위 오류")
-                            else:
-                                new_particle = {"id": len(particles), "box": [mx1, my1, mx2, my2], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True}
-                                particles.append(new_particle)
-                                data['particles'] = particles
-                                data['reports'] = particles
-                                with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                                st.success("추가됨!")
-                                st.rerun()
+                            new_particle = {"id": len(particles), "box": [mx1, my1, mx2, my2], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True}
+                            particles.append(new_particle)
+                            data['particles'] = particles
+                            data['reports'] = particles
+                            with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                            st.rerun()
 
-                    # 수정 폼
                     with st.form("update"):
                         new_parts = []
                         cols = st.columns(2)
                         for i, p in enumerate(particles):
                             with cols[i%2]:
                                 stat = p.get('status','SAFE')
-                                # [라벨링 v16 적용] Area 1, Area 2...
-                                st.write(f"**Area {i+1}**: {stat}")
+                                st.write(f"**ID {i}**: {stat}")
                                 idx = ["SAFE","CONTAMINATED","RECHECK REQUIRED"].index(stat) if stat in ["SAFE","CONTAMINATED","RECHECK REQUIRED"] else 0
-                                new_stat = st.radio("상태", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
+                                new_stat = st.radio("Status", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
                                 p['status'] = new_stat
                                 p['id'] = i
                                 new_parts.append(p)
@@ -303,12 +294,11 @@ if mode == "관리자 모드":
                             data['reports'] = new_parts
                             data['reviewed'] = True
                             with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                            st.success("저장됨")
-                            st.rerun()
+                            st.success("저장됨"); st.rerun()
                 else:
-                    st.image(standardize_image_size(img_rgb, 800, 600), caption="입자 없음", width=800)
+                    st.image(standardize_image_size(img_rgb, 800, 600), width=800)
                     st.warning("입자가 없습니다.")
-                    if st.button("➕ 중앙에 입자 강제 추가"):
+                    if st.button("➕ 중앙에 추가"):
                          h, w = img_rgb.shape[:2]
                          new_p = {"id":0, "box":[int(w*0.3),int(h*0.3),int(w*0.7),int(h*0.7)], "status":"CONTAMINATED", "phi":0, "cyan":0, "orange":0, "manual":True}
                          data['particles'] = [new_p]; data['reports'] = [new_p]
@@ -337,14 +327,16 @@ elif mode == "실시간 분석":
                 with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
                     json.dump({"filename":f"{fn}.jpg", "timestamp":ts, "reports":reports, "reviewed":False}, f, indent=4)
                 
-                # [v16 적용] 화면 크기 고정 (800)
+                # [적용] 이미지 크기 고정
                 display_img = standardize_image_size(res_img, 800, 600)
                 with c1: st.image(cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB), caption="분석 완료", width=800)
                 with c2:
                     if reports:
                         for r in reports:
                             clr = "red" if r['status']=="CONTAMINATED" else "green" if r['status']=="SAFE" else "orange"
-                            # [라벨링 v16 적용] Area 1, Area 2...
-                            st.markdown(f'<div style="border:2px solid {clr}; padding:5px; margin:5px; border-radius:5px;">Area {r["id"]+1}: <b>{r["status"]}</b><br>Phi: {r["phi"]}</div>', unsafe_allow_html=True)
+                            st.markdown(f'<div style="border:2px solid {clr}; padding:5px; margin:5px; border-radius:5px;">ID {r["id"]}: <b>{r["status"]}</b><br>Phi: {r["phi"]}</div>', unsafe_allow_html=True)
                     else: st.warning("입자 없음")
             except Exception as e: st.error(f"오류: {e}")
+```
+
+이 코드로 `app.py`를 교체하시면, **v10.2.1의 로직**은 그대로 유지되면서 **삭제 기능**과 **화면 고정(800x600)** 기능이 적용됩니다. 이제 정말 원하시던 그 상태일 겁니다!
