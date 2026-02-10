@@ -1,7 +1,7 @@
 streamlit==1.39.0
 opencv-python-headless
 ultralytics
-numpy
+numpy<2
 pillow
 torch
 streamlit-drawable-canvas
