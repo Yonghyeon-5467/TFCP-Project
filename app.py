@@ -4,14 +4,15 @@ import numpy as np
 from ultralytics import YOLO
 from PIL import Image
 import os
-import torch
 import json
+import shutil
 from datetime import datetime
+import pandas as pd
 
 # --- [1] 페이지 및 기본 설정 ---
-st.set_page_config(page_title="TFCP AI BigData Platform", page_icon="📡", layout="wide")
+st.set_page_config(page_title="TFCP Data Manager", page_icon="🧪", layout="wide")
 
-# 로컬 저장소 경로 (Streamlit Cloud 임시 저장소)
+# 저장소 경로 설정
 SAVE_ROOT = "TFCP_Data"
 IMG_DIR = os.path.join(SAVE_ROOT, "raw_images")
 LOG_DIR = os.path.join(SAVE_ROOT, "analysis_logs")
@@ -19,26 +20,24 @@ LOG_DIR = os.path.join(SAVE_ROOT, "analysis_logs")
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 if not os.path.exists(LOG_DIR): os.makedirs(LOG_DIR)
 
-# --- [2] 모델 로드 (캐싱 적용) ---
+# --- [2] 모델 로드 ---
 @st.cache_resource
 def load_model():
-    # GitHub 저장소에 best.pt가 업로드되어 있어야 합니다.
     if os.path.exists('best.pt'):
         return YOLO('best.pt')
     return None
 
 model = load_model()
 
-# --- [3] 핵심 분석 엔진 (v10.2.1 로직 탑재) ---
+# --- [3] 핵심 분석 엔진 (v10.2.1 로직) ---
+# (분석 로직은 동일하게 유지하되, 일부 헬퍼 함수 생략 없이 포함)
 
 def apply_gamma_correction(image, gamma=0.8):
-    """과노출(Saturation) 보정"""
     invGamma = 1.0 / gamma
     table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
     return cv2.LUT(image, table)
 
 def calculate_iou(box1, box2):
-    """박스 중첩 비율 계산"""
     b1, b2 = box1.flatten(), box2.flatten()
     ix1, iy1 = max(b1[0], b2[0]), max(b1[1], b2[1])
     ix2, iy2 = min(b1[2], b2[2]), min(b1[3], b2[3])
@@ -49,7 +48,6 @@ def calculate_iou(box1, box2):
     return inter / union if union > 0 else 0
 
 def filter_nested_boxes(boxes):
-    """중복 및 포함 관계 박스 제거"""
     if len(boxes) == 0: return []
     sorted_indices = np.argsort([b.conf.item() for b in boxes])[::-1]
     keep_indices = []
@@ -69,7 +67,6 @@ def filter_nested_boxes(boxes):
     return [boxes[idx] for idx in keep_indices]
 
 def detect_particles_heuristically(img):
-    """AI 실패 시 백업 탐지 (CV 로직)"""
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     mask_o = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([45, 255, 255]))
     mask_c = cv2.inRange(hsv, np.array([85, 30, 30]), np.array([165, 255, 255]))
@@ -78,13 +75,11 @@ def detect_particles_heuristically(img):
     combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
     contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     found_boxes = []
-    
     class FakeBox:
         def __init__(self, coords):
             import torch
             self.xyxy = torch.tensor([coords], dtype=torch.float32)
             self.conf = torch.tensor([0.15])
-            
     for cnt in contours:
         if cv2.contourArea(cnt) > 3000:
             x, y, w, h = cv2.boundingRect(cnt)
@@ -94,7 +89,6 @@ def detect_particles_heuristically(img):
     return found_boxes
 
 def process_frame(img):
-    """이미지 처리 메인 파이프라인"""
     img = apply_gamma_correction(img, gamma=0.8)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     img_h, img_w = img.shape[:2]
@@ -106,7 +100,6 @@ def process_frame(img):
         ai_raw_boxes = []
 
     combined_boxes = []
-    # AI 박스 유효성 검증 (신호 강도 체크)
     for box in ai_raw_boxes:
         coords = box.xyxy[0].cpu().numpy().flatten(); x1, y1, x2, y2 = map(int, coords)
         if (x2-x1) < 50 or (y2-y1) < 50: continue
@@ -116,7 +109,6 @@ def process_frame(img):
         m_c = cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
         if np.sum(m_o > 0) + np.sum(m_c > 0) > 200: combined_boxes.append((box, "AI"))
 
-    # AI 미검출 시 CV 백업 가동
     if not combined_boxes:
         cv_raw_boxes = detect_particles_heuristically(img)
         for cv_box in cv_raw_boxes:
@@ -148,7 +140,6 @@ def process_frame(img):
         box_area = (nx2 - nx1) * (ny2 - ny1)
         orange_area_pct = (p_count / box_area) * 100 if box_area > 0 else 0
 
-        # 판정 로직 v10.2.1
         if p_count < 100 or orange_area_pct < 3.0:
             status = "RECHECK REQUIRED"
             cv_color = (0, 165, 255) # Orange BGR
@@ -181,61 +172,134 @@ def process_frame(img):
         
         reports.append({
             "id": i, "status": status, "phi": float(round(phi, 2)), 
-            "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2))
+            "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)),
+            "box": [int(nx1), int(ny1), int(nx2), int(ny2)]
         })
 
     return draw_img, reports
 
-# --- UI 실행 ---
-st.title("🧪 TFCP Intelligent Analyzer")
-st.markdown("---")
-
-if model is None:
-    st.error("⚠️ 'best.pt' file missing. Please check GitHub repository.")
-
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.subheader("📷 Capture")
-    img_file = st.camera_input("Take a photo")
-    if not img_file:
-        st.info("Or upload file:")
-        img_file = st.file_uploader("Upload Image", type=['jpg', 'png', 'jpeg'])
-
-if img_file:
-    # 이미지 로드
-    file_bytes = np.asarray(bytearray(img_file.read()), dtype=np.uint8)
-    image = cv2.imdecode(file_bytes, 1)
+# --- [관리자 페이지: 데이터 검수 및 다운로드] ---
+def render_admin_page():
+    st.title("🗂️ 연구 데이터 관리 센터")
     
-    # 분석 실행
-    result_img, reports = process_frame(image)
-    
-    # 데이터 자동 저장 (로컬 JSON/JPG)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_name = f"TFCP_{timestamp}"
-    cv2.imwrite(os.path.join(IMG_DIR, f"{save_name}.jpg"), image)
-    with open(os.path.join(LOG_DIR, f"{save_name}.json"), "w") as f:
-        json.dump({"filename": f"{save_name}.jpg", "reports": reports}, f, indent=4)
+    # 1. 데이터 목록 표시
+    log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
+    if not log_files:
+        st.warning("저장된 분석 데이터가 없습니다.")
+        return
 
-    # 결과 출력
-    with col1:
-        st.image(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB), caption=f"Analyzed: {save_name}", use_container_width=True)
-        st.toast("Data Saved!", icon="💾")
+    st.write(f"총 **{len(log_files)}**개의 분석 기록이 있습니다.")
     
-    with col2:
-        st.subheader("📊 Data")
-        if reports:
-            for r in reports:
-                # 상태별 색상 지정
-                c_map = {"CONTAMINATED": "red", "SAFE": "green", "RECHECK REQUIRED": "orange"}
-                s_color = c_map.get(r['status'], "grey")
+    col_list, col_view = st.columns([1, 2])
+    
+    with col_list:
+        selected_log = st.selectbox("분석 기록 선택", log_files, index=0)
+        
+        # [기능 1] 전체 데이터 다운로드 버튼
+        if st.button("📦 전체 데이터 백업 (ZIP)"):
+            shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
+            with open("TFCP_Backup.zip", "rb") as fp:
+                st.download_button(
+                    label="ZIP 다운로드 시작",
+                    data=fp,
+                    file_name="TFCP_Backup.zip",
+                    mime="application/zip"
+                )
+
+    with col_view:
+        if selected_log:
+            log_path = os.path.join(LOG_DIR, selected_log)
+            with open(log_path, 'r') as f:
+                data = json.load(f)
+            
+            img_path = os.path.join(IMG_DIR, data['filename'])
+            if os.path.exists(img_path):
+                # 이미지 및 현재 상태 시각화
+                image = Image.open(img_path)
+                img_np = np.array(image)
+                draw_img = img_np.copy()
                 
-                st.markdown(f'''
-                <div style="border: 2px solid {s_color}; border-radius: 10px; padding: 10px; margin-bottom: 10px;">
-                    <h4 style="color: {s_color}; margin: 0;">ID {r['id']}: {r['status']}</h4>
-                    <p style="margin: 5px 0;"><b>Phi:</b> {r['phi']} | <b>Cyan:</b> {r['cyan']}%</p>
-                    <p style="margin: 5px 0; color: grey; font-size: 0.8em;">Density: {r['orange']}%</p>
-                </div>
-                ''', unsafe_allow_html=True)
-        else:
-            st.warning("No particles detected.")
+                for p in data['particles']:
+                    x1, y1, x2, y2 = p['box']
+                    status = p.get('status', 'SAFE')
+                    color = (255, 0, 0) if status == "CONTAMINATED" else (0, 255, 0)
+                    if status == "RECHECK REQUIRED": color = (255, 165, 0)
+                    cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
+                    cv2.putText(draw_img, f"ID:{p['id']}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 3)
+                
+                st.image(draw_img, caption=f"File: {data['filename']}", use_container_width=True)
+                
+                # [기능 2] 데이터 수정 (Labeling)
+                st.write("#### 📝 판정 결과 수정")
+                with st.form("correction_form"):
+                    updated_particles = []
+                    cols = st.columns(2)
+                    for i, p in enumerate(data['particles']):
+                        with cols[i % 2]:
+                            st.info(f"**ID {p['id']}** (AI: {p['status']})")
+                            new_status = st.radio(
+                                "Correct Status:",
+                                ["SAFE", "CONTAMINATED", "RECHECK REQUIRED"],
+                                index=["SAFE", "CONTAMINATED", "RECHECK REQUIRED"].index(p.get('status', 'SAFE')),
+                                key=f"p_{i}"
+                            )
+                            p['status'] = new_status
+                            updated_particles.append(p)
+                    
+                    if st.form_submit_button("✅ 수정 사항 저장"):
+                        data['particles'] = updated_particles
+                        data['reviewed'] = True
+                        with open(log_path, 'w') as f:
+                            json.dump(data, f, indent=4)
+                        st.success("데이터가 수정되었습니다!")
+                        st.rerun()
+
+# --- [메인 UI] ---
+if 'admin_mode' not in st.session_state:
+    st.session_state['admin_mode'] = False
+
+# 사이드바
+st.sidebar.title("메뉴")
+mode = st.sidebar.radio("이동", ["실시간 분석", "관리자 모드"])
+
+if mode == "관리자 모드":
+    if not st.session_state['admin_mode']:
+        pwd = st.sidebar.text_input("관리자 비밀번호", type="password")
+        if pwd == "tfcp2026":
+            st.session_state['admin_mode'] = True
+            st.rerun()
+    else:
+        render_admin_page()
+
+elif mode == "실시간 분석":
+    st.title("🧪 TFCP 분석기")
+    if model is None:
+        st.error("모델 파일(best.pt)이 없습니다.")
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        img_file = st.camera_input("촬영")
+        if not img_file: img_file = st.file_uploader("업로드", type=['jpg','png'])
+    
+    if img_file:
+        file_bytes = np.asarray(bytearray(img_file.read()), dtype=np.uint8)
+        image = cv2.imdecode(file_bytes, 1)
+        result_img, reports = process_frame(image)
+        
+        # 자동 저장
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_name = f"TFCP_{timestamp}"
+        cv2.imwrite(os.path.join(IMG_DIR, f"{save_name}.jpg"), image)
+        with open(os.path.join(LOG_DIR, f"{save_name}.json"), "w") as f:
+            json.dump({"filename": f"{save_name}.jpg", "timestamp": timestamp, "reports": reports, "reviewed": False}, f, indent=4)
+            
+        with col1:
+            st.image(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB), caption="분석 완료", use_container_width=True)
+        with col2:
+            st.write("### 결과")
+            if reports:
+                for r in reports:
+                    c = "red" if r['status']=="CONTAMINATED" else "green" if r['status']=="SAFE" else "orange"
+                    st.markdown(f'<div style="border:2px solid {c}; padding:5px; margin:5px; border-radius:5px;">ID {r["id"]}: <b>{r["status"]}</b><br>Phi: {r["phi"]}</div>', unsafe_allow_html=True)
+            else:
+                st.warning("입자 없음")
