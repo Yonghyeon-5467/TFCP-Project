@@ -192,12 +192,13 @@ if mode == "관리자 모드":
                     if p.get('status')=="RECHECK REQUIRED": color = "#FFA500"
                     init_objs.append({"type":"rect", "left":x1, "top":y1, "width":x2-x1, "height":y2-y1, "stroke":color, "strokeWidth":4, "fill":"rgba(0,0,0,0)"})
                 
+                # [수정됨] 이미지 표시 시 use_column_width 사용
                 canvas_res = st_canvas(fill_color="rgba(255,0,255,0.2)", stroke_width=4, stroke_color="#FF00FF", background_image=Image.fromarray(img_rgb), update_streamlit=True, height=img_rgb.shape[0], width=img_rgb.shape[1], drawing_mode="rect", initial_drawing={"version":"4.4.0", "objects":init_objs}, key=f"canv_{data['timestamp']}")
                 
                 if canvas_res.json_data:
                     objects = canvas_res.json_data["objects"]
                     if len(objects) != len(particles): # 새로 그려진 경우
-                        pass # 로직 생략 (복잡도 감소)
+                        pass 
                 
                 # 수정 폼
                 with st.form("update"):
@@ -244,7 +245,8 @@ elif mode == "실시간 분석":
                 with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
                     json.dump({"filename":f"{fn}.jpg", "timestamp":ts, "reports":reports, "reviewed":False}, f, indent=4)
                 
-                with c1: st.image(cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB), caption="분석 완료", use_container_width=True)
+                # [수정됨] use_container_width -> use_column_width 로 변경 (호환성 확보)
+                with c1: st.image(cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB), caption="분석 완료", use_column_width=True)
                 with c2:
                     if reports:
                         for r in reports:
