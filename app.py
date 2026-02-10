@@ -166,11 +166,8 @@ def process_frame(img):
             cv_color = (255, 255, 0) if status == "CONTAMINATED" else (0, 255, 0)
 
         cv2.rectangle(draw_img, (nx1, ny1), (nx2, ny2), cv_color, 4)
-        
-        # [수정] 라벨 텍스트: "Area {순번}"으로 변경, 글자 크기 적절히 조절 (0.9, 두께 2)
         label_text = f"Area {i+1}: {status[:4]}"
         if status == "RECHECK REQUIRED": label_text = f"Area {i+1}: RECHECK"
-        
         cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, cv_color, 2)
         
         reports.append({
@@ -185,106 +182,165 @@ def process_frame(img):
 def render_admin_page():
     st.title("🗂️ 연구 데이터 관리 센터")
     
-    # 데이터 목록 표시
+    # [네비게이션 1] 데이터 인덱스 관리 (세션 상태)
+    if 'log_index' not in st.session_state:
+        st.session_state.log_index = 0
+
     log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
     if not log_files:
         st.warning("저장된 데이터가 없습니다.")
         return
+    
+    # 인덱스 범위 보호
+    if st.session_state.log_index >= len(log_files):
+        st.session_state.log_index = 0
+    elif st.session_state.log_index < 0:
+        st.session_state.log_index = len(log_files) - 1
+
+    current_file = log_files[st.session_state.log_index]
 
     col_list, col_view = st.columns([1, 2])
     
     with col_list:
-        st.write(f"총 **{len(log_files)}**개의 기록")
-        selected_log = st.selectbox("분석 기록 선택", log_files, index=0)
+        st.write(f"총 **{len(log_files)}**개의 기록 중 **{st.session_state.log_index + 1}**번째")
         
-        if st.button("📦 전체 데이터 백업 (ZIP 다운로드)"):
+        # [네비게이션 2] 이전/다음 버튼
+        c_prev, c_curr, c_next = st.columns([1, 2, 1])
+        if c_prev.button("◀️", use_container_width=True):
+            st.session_state.log_index -= 1
+            st.rerun()
+        if c_next.button("▶️", use_container_width=True):
+            st.session_state.log_index += 1
+            st.rerun()
+            
+        # 선택 박스 (동기화)
+        def update_index():
+            st.session_state.log_index = log_files.index(st.session_state.selected_log_box)
+            
+        st.selectbox(
+            "목록에서 바로 가기", 
+            log_files, 
+            index=st.session_state.log_index,
+            key='selected_log_box',
+            on_change=update_index
+        )
+        
+        st.divider()
+        if st.button("📦 전체 데이터 백업 (ZIP)"):
             shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
             with open("TFCP_Backup.zip", "rb") as fp:
-                st.download_button("ZIP 다운로드", fp, "TFCP_Backup.zip", "application/zip")
+                st.download_button("📥 다운로드 시작", fp, "TFCP_Backup.zip", "application/zip")
 
     with col_view:
-        if selected_log:
-            log_path = os.path.join(LOG_DIR, selected_log)
-            try:
-                with open(log_path, 'r') as f: data = json.load(f)
-            except:
-                st.error("파일 오류")
-                return
+        log_path = os.path.join(LOG_DIR, current_file)
+        try:
+            with open(log_path, 'r') as f: data = json.load(f)
+        except:
+            st.error("파일 손상됨")
+            return
+        
+        img_name = data.get('filename')
+        img_path = os.path.join(IMG_DIR, img_name)
+        
+        if os.path.exists(img_path):
+            image_raw = cv2.imread(img_path)
+            image_corrected = apply_gamma_correction(image_raw, gamma=0.8)
+            image_rgb = cv2.cvtColor(image_corrected, cv2.COLOR_BGR2RGB)
+            draw_img = image_rgb.copy()
             
-            img_name = data.get('filename')
-            img_path = os.path.join(IMG_DIR, img_name)
+            particles = data.get('particles', data.get('reports', []))
             
-            if os.path.exists(img_path):
-                # 이미지 및 현재 상태 시각화
-                image_raw = cv2.imread(img_path)
-                image_corrected = apply_gamma_correction(image_raw, gamma=0.8)
-                image_rgb = cv2.cvtColor(image_corrected, cv2.COLOR_BGR2RGB)
-                draw_img = image_rgb.copy()
+            # [이미지 그리기]
+            if particles:
+                for idx, p in enumerate(particles):
+                    if 'box' not in p: continue
+                    x1, y1, x2, y2 = p['box']
+                    status = p.get('status', 'SAFE')
+                    
+                    color = (0, 255, 0) 
+                    if status == "CONTAMINATED": color = (255, 0, 0)
+                    elif status == "RECHECK REQUIRED": color = (255, 165, 0)
+                    
+                    cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
+                    label_text = f"Area {idx + 1}: {status[:4]}"
+                    if status == "RECHECK REQUIRED": label_text = f"Area {idx + 1}: RECHECK"
+                    cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+            
+            st.image(draw_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", use_container_width=True)
+            
+            # [수동 영역 지정 기능]
+            with st.expander("➕ 수동 영역 지정 및 추가 (Manual Selection)", expanded=False):
+                st.info("AI가 놓친 입자가 있다면, 아래 슬라이더로 영역을 지정하고 추가하세요.")
+                h, w = img_np = image_rgb.shape[:2]
                 
-                particles = data.get('particles', data.get('reports', []))
+                mc1, mc2 = st.columns(2)
+                with mc1:
+                    mx1 = st.slider("X 시작 (좌)", 0, w, int(w*0.3), key="mx1")
+                    mx2 = st.slider("X 끝 (우)", 0, w, int(w*0.7), key="mx2")
+                with mc2:
+                    my1 = st.slider("Y 시작 (상)", 0, h, int(h*0.3), key="my1")
+                    my2 = st.slider("Y 끝 (하)", 0, h, int(h*0.7), key="my2")
                 
-                if particles:
-                    for p in particles:
-                        if 'box' not in p: continue
-                        x1, y1, x2, y2 = p['box']
-                        status = p.get('status', 'SAFE')
-                        p_id = p.get('id', 0)
-                        
-                        color = (0, 255, 0) # Green (SAFE)
-                        if status == "CONTAMINATED": color = (255, 0, 0) # Red
-                        elif status == "RECHECK REQUIRED": color = (255, 165, 0) # Orange
-                        
-                        cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
-                        
-                        # [수정] 관리자 모드 시각화: "Area {순번}" 적용, 글자 크기 0.9로 조정
-                        label_text = f"Area {p_id + 1}: {status[:4]}"
-                        if status == "RECHECK REQUIRED": label_text = f"Area {p_id + 1}: RECHECK"
-                        
-                        cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+                # 미리보기
+                preview = draw_img.copy()
+                cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
+                st.image(preview, caption="영역 미리보기 (보라색 박스)", width=300)
+                
+                if st.button("✅ 이 영역을 'CONTAMINATED'로 추가"):
+                    if mx1 >= mx2 or my1 >= my2:
+                        st.error("좌표 범위가 잘못되었습니다.")
+                    else:
+                        new_id = len(particles)
+                        new_p = {
+                            "id": new_id,
+                            "box": [mx1, my1, mx2, my2],
+                            "status": "CONTAMINATED",
+                            "phi": 0, "cyan": 0, "orange": 0, "manual": True
+                        }
+                        particles.append(new_p)
+                        data['particles'] = particles
+                        # report와 particle 키 동기화
+                        data['reports'] = particles
+                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                        st.success("추가되었습니다! 아래 목록에서 상태를 최종 확인하세요.")
+                        st.rerun()
+
+            # [수정 폼]
+            if particles:
+                st.write("#### 📝 판정 결과 수정")
+                with st.form("correction_form"):
+                    updated_particles = []
+                    cols = st.columns(2)
+                    for i, p in enumerate(particles):
+                        with cols[i % 2]:
+                            status = p.get('status', 'SAFE')
+                            st_color = "green" if status == "SAFE" else "red" if status == "CONTAMINATED" else "orange"
+                            
+                            st.markdown(f"**Area {i + 1}** : <span style='color:{st_color}'><b>{status}</b></span>", unsafe_allow_html=True)
+                            
+                            options = ["SAFE", "CONTAMINATED", "RECHECK REQUIRED"]
+                            try:
+                                idx = options.index(status)
+                            except: idx = 0
+                            
+                            new_status = st.radio("상태 변경:", options, index=idx, key=f"p_{i}", horizontal=True)
+                            p['status'] = new_status
+                            # id값 재정렬 (혹시 모를 오류 방지)
+                            p['id'] = i
+                            updated_particles.append(p)
+                            st.write("---")
                     
-                    st.image(draw_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", use_container_width=True)
-                    
-                    # 수정 폼
-                    st.write("#### 📝 판정 결과 수정")
-                    with st.form("correction_form"):
-                        updated_particles = []
-                        cols = st.columns(2)
-                        for i, p in enumerate(particles):
-                            with cols[i % 2]:
-                                status = p.get('status', 'SAFE')
-                                st_color = "green" if status == "SAFE" else "red" if status == "CONTAMINATED" else "orange"
-                                
-                                # [수정] 폼 라벨도 Area로 변경
-                                st.markdown(f"**Area {p.get('id', i) + 1}** : <span style='color:{st_color}'><b>{status}</b></span>", unsafe_allow_html=True)
-                                
-                                options = ["SAFE", "CONTAMINATED", "RECHECK REQUIRED"]
-                                idx = options.index(status) if status in options else 0
-                                
-                                new_status = st.radio(
-                                    "올바른 상태 선택:",
-                                    options,
-                                    index=idx,
-                                    key=f"p_{i}",
-                                    horizontal=True
-                                )
-                                p['status'] = new_status
-                                updated_particles.append(p)
-                                st.write("---")
-                        
-                        if st.form_submit_button("✅ 수정 사항 저장 (Save Corrections)"):
-                            data['reports'] = updated_particles 
-                            data['particles'] = updated_particles
-                            data['reviewed'] = True
-                            with open(log_path, 'w') as f:
-                                json.dump(data, f, indent=4)
-                            st.success("데이터가 수정되었습니다!")
-                            st.rerun()
-                else:
-                    st.image(image_rgb, caption="입자 없음")
-                    st.warning("이 이미지에서는 감지된 입자가 없습니다.")
-                    
+                    if st.form_submit_button("✅ 수정 사항 저장 (Save Corrections)"):
+                        data['particles'] = updated_particles
+                        data['reports'] = updated_particles
+                        data['reviewed'] = True
+                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                        st.success("데이터가 수정되었습니다!")
+                        st.rerun()
             else:
-                st.error(f"이미지 파일을 찾을 수 없습니다: {img_name}")
+                st.warning("이 이미지에는 감지된 입자가 없습니다. 위 '수동 영역 지정'을 통해 추가해주세요.")
+        else:
+            st.error(f"이미지 원본을 찾을 수 없습니다: {img_name}")
 
 # --- [메인 UI] ---
 if 'admin_mode' not in st.session_state:
@@ -300,15 +356,14 @@ if mode == "관리자 모드":
             st.session_state['admin_mode'] = True
             st.rerun()
         elif pwd:
-            st.error("비밀번호가 틀렸습니다.")
+            st.error("비밀번호 오류")
     
     if st.session_state['admin_mode']:
         render_admin_page()
 
 elif mode == "실시간 분석":
     st.title("🧪 TFCP 분석기")
-    if model is None:
-        st.warning("⚠️ 모델 파일(best.pt)이 없습니다.")
+    if model is None: st.warning("⚠️ 모델 파일(best.pt)이 없습니다.")
     
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -334,7 +389,6 @@ elif mode == "실시간 분석":
             if reports:
                 for r in reports:
                     c = "red" if r['status']=="CONTAMINATED" else "green" if r['status']=="SAFE" else "orange"
-                    # [수정] 결과 카드에도 Area {id+1} 적용
                     st.markdown(f'<div style="border:2px solid {c}; padding:5px; margin:5px; border-radius:5px;">Area {r["id"]+1}: <b>{r["status"]}</b><br>Phi: {r["phi"]}</div>', unsafe_allow_html=True)
             else:
                 st.warning("입자 없음")
