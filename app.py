@@ -58,7 +58,6 @@ def filter_nested_boxes(boxes):
         keep = True
         for j in keep_indices:
             box_b = boxes[j].xyxy[0].cpu().numpy().flatten()
-            # 중첩(IoU)이 크거나 포함 관계면 제거
             if calculate_iou(box_a, box_b) > 0.3:
                 keep = False; break
             ix1, iy1 = max(box_a[0], box_b[0]), max(box_a[1], box_b[1])
@@ -82,14 +81,13 @@ def detect_particles_heuristically(img):
     
     class FakeBox:
         def __init__(self, coords):
-            # YOLO Box 객체 구조 모방
+            import torch
             self.xyxy = torch.tensor([coords], dtype=torch.float32)
             self.conf = torch.tensor([0.15])
             
     for cnt in contours:
         if cv2.contourArea(cnt) > 3000:
             x, y, w, h = cv2.boundingRect(cnt)
-            # 기하학적 필터 (비율 확인)
             aspect_ratio = float(w)/h if h>0 else 0
             if 0.2 < aspect_ratio < 5.0:
                 found_boxes.append(FakeBox([x, y, x+w, y+h]))
@@ -101,7 +99,6 @@ def process_frame(img):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     img_h, img_w = img.shape[:2]
 
-    # 1. AI 탐색
     if model:
         results = model.predict(source=img, conf=0.10, iou=0.45, verbose=False)
         ai_raw_boxes = filter_nested_boxes(results[0].boxes)
@@ -109,20 +106,17 @@ def process_frame(img):
         ai_raw_boxes = []
 
     combined_boxes = []
-    
-    # 2. AI 박스 유효성 검증 (신호 강도 체크)
+    # AI 박스 유효성 검증 (신호 강도 체크)
     for box in ai_raw_boxes:
         coords = box.xyxy[0].cpu().numpy().flatten(); x1, y1, x2, y2 = map(int, coords)
         if (x2-x1) < 50 or (y2-y1) < 50: continue
         roi_hsv = hsv[max(0,y1):min(img_h,y2), max(0,x1):min(img_w,x2)]
         if roi_hsv.size == 0: continue
-        
         m_o = cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([55, 255, 255]))
         m_c = cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
-        if np.sum(m_o > 0) + np.sum(m_c > 0) > 200: 
-            combined_boxes.append((box, "AI"))
+        if np.sum(m_o > 0) + np.sum(m_c > 0) > 200: combined_boxes.append((box, "AI"))
 
-    # 3. AI 미검출 시 CV 백업 가동
+    # AI 미검출 시 CV 백업 가동
     if not combined_boxes:
         cv_raw_boxes = detect_particles_heuristically(img)
         for cv_box in cv_raw_boxes:
@@ -138,12 +132,9 @@ def process_frame(img):
         if roi_hsv.size == 0: continue
         
         valid_mask = (roi_hsv[:,:,1]>25) & (roi_hsv[:,:,2]>25)
-        
-        # 색상 마스킹
         mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([60, 255, 255]))
         mask_cyan_candidate = cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
         
-        # 입자 본체 추출 및 면적 계산
         mask_particle_body = np.zeros_like(mask_orange)
         closed_orange = cv2.morphologyEx(mask_orange & (valid_mask.astype(np.uint8)*255), cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
         contours, _ = cv2.findContours(closed_orange, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -157,24 +148,22 @@ def process_frame(img):
         box_area = (nx2 - nx1) * (ny2 - ny1)
         orange_area_pct = (p_count / box_area) * 100 if box_area > 0 else 0
 
-        # [판정 로직 v10.2.1] 밀도 미달 시 RECHECK
+        # 판정 로직 v10.2.1
         if p_count < 100 or orange_area_pct < 3.0:
             status = "RECHECK REQUIRED"
             cv_color = (0, 165, 255) # Orange BGR
-            phi = 0; cyan_area = 0
+            phi = 0
+            cyan_area = 0
         else:
             mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3,3), np.uint8), iterations=1)
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
             
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
-            
-            # 과노출(Saturation) 보정 로직
             is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
             is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
             mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
             saturated_pixels = np.sum(mask_saturated_valid > 0)
 
-            # 강도 계산
             intensity_raw = np.where(is_glare, 0, np.where(is_saturated_cyan, ((g_ch + b_ch)/2.0 - r_ch*0.8), ((g_ch + b_ch)/2.0 - r_ch*1.7)))
             intensity_map = np.clip(intensity_raw, 0, 100)
             
@@ -182,12 +171,10 @@ def process_frame(img):
             avg_int = np.mean(intensity_map[mask_cyan>0]) if np.sum(mask_cyan>0)>0 else 0
             phi = cyan_area * (avg_int / 10.0)
             
-            # 최종 상태 판정
             status = "CONTAMINATED" if (phi > 5.0 or saturated_pixels > 20) else "SAFE"
             if status == "CONTAMINATED" and phi < 5.0: phi = 99.9
             cv_color = (255, 255, 0) if status == "CONTAMINATED" else (0, 255, 0)
 
-        # 시각화
         cv2.rectangle(draw_img, (nx1, ny1), (nx2, ny2), cv_color, 4)
         label_text = f"{status[:4]} P:{phi:.1f}"
         cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, cv_color, 2)
@@ -199,14 +186,12 @@ def process_frame(img):
 
     return draw_img, reports
 
-# --- [4] UI 레이아웃 ---
-
+# --- UI 실행 ---
 st.title("🧪 TFCP Intelligent Analyzer")
 st.markdown("---")
 
-# 모델 상태 확인
 if model is None:
-    st.error("⚠️ Model file (best.pt) missing. Please upload to GitHub.")
+    st.error("⚠️ 'best.pt' file missing. Please check GitHub repository.")
 
 col1, col2 = st.columns([2, 1])
 
