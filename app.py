@@ -12,7 +12,6 @@ import pandas as pd
 # --- [1] 페이지 및 기본 설정 ---
 st.set_page_config(page_title="TFCP Data Manager", page_icon="🧪", layout="wide")
 
-# 저장소 경로 설정
 SAVE_ROOT = "TFCP_Data"
 IMG_DIR = os.path.join(SAVE_ROOT, "raw_images")
 LOG_DIR = os.path.join(SAVE_ROOT, "analysis_logs")
@@ -29,16 +28,14 @@ def load_model():
 
 model = load_model()
 
-# --- [3] 핵심 분석 엔진 ---
+# --- [3] 헬퍼 함수 정의 ---
 
 def apply_gamma_correction(image, gamma=0.8):
     invGamma = 1.0 / gamma
     table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
     return cv2.LUT(image, table)
 
-# [복구] 이미지 크기 고정 함수 (Letterbox)
 def standardize_image_size(img, target_width=800, target_height=600):
-    """이미지 비율 유지하며 고정 크기로 리사이징 (빈 공간은 검은색)"""
     h, w = img.shape[:2]
     scale = min(target_width/w, target_height/h)
     nw, nh = int(w*scale), int(h*scale)
@@ -83,8 +80,8 @@ def filter_nested_boxes(boxes):
 
 def detect_particles_heuristically(img):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask_o = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([45, 255, 255]))
-    mask_c = cv2.inRange(hsv, np.array([85, 30, 30]), np.array([165, 255, 255]))
+    mask_o = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([65, 255, 255]))
+    mask_c = cv2.inRange(hsv, np.array([75, 30, 30]), np.array([170, 255, 255]))
     combined = cv2.bitwise_or(mask_o, mask_c)
     kernel = np.ones((25,25), np.uint8)
     combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
@@ -119,7 +116,7 @@ def process_frame(img):
         if (x2-x1) < 50 or (y2-y1) < 50: continue
         roi_hsv = hsv[max(0,y1):min(img_h,y2), max(0,x1):min(img_w,x2)]
         if roi_hsv.size == 0: continue
-        if np.sum(cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([55, 255, 255]))) + np.sum(cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))) > 200:
+        if np.sum(cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([65, 255, 255]))) + np.sum(cv2.inRange(roi_hsv, np.array([75, 30, 30]), np.array([170, 255, 255]))) > 100:
             combined_boxes.append((box, "AI"))
 
     if not combined_boxes:
@@ -135,8 +132,8 @@ def process_frame(img):
         if roi_hsv.size == 0: continue
         
         valid_mask = (roi_hsv[:,:,1]>25) & (roi_hsv[:,:,2]>25)
-        mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([60, 255, 255]))
-        mask_cyan_candidate = cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
+        mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([65, 255, 255]))
+        mask_cyan_candidate = cv2.inRange(roi_hsv, np.array([75, 30, 30]), np.array([170, 255, 255]))
         
         mask_particle_body = np.zeros_like(mask_orange)
         contours, _ = cv2.findContours(cv2.morphologyEx(mask_orange & (valid_mask.astype(np.uint8)*255), cv2.MORPH_CLOSE, np.ones((5,5), np.uint8)), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -145,18 +142,32 @@ def process_frame(img):
         box_area = (nx2-nx1)*(ny2-ny1)
         orange_area_pct = (p_count/box_area)*100 if box_area>0 else 0
 
-        if p_count < 100 or orange_area_pct < 3.0:
+        if p_count < 50 and method == "AI":
             status = "RECHECK REQUIRED"; cv_color = (0, 165, 255); phi = 0; cyan_area = 0
             avg_int = 0
         else:
-            mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3,3), np.uint8), iterations=1)
+            mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((5,5), np.uint8), iterations=3)
+            if p_count < 50: mask_containment_zone = np.ones_like(mask_orange) * 255
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
+            
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
-            intensity_raw = np.where((g_ch>200)&(b_ch>200)&(r_ch>200), 0, np.where((g_ch>200)&(b_ch>200)&(r_ch<200), ((g_ch+b_ch)/2.0-r_ch*0.8), ((g_ch+b_ch)/2.0-r_ch*1.7)))
-            cyan_area = (np.sum(mask_cyan>0)/p_count*100) if p_count>0 else 0
-            avg_int = np.mean(np.clip(intensity_raw,0,100)[mask_cyan>0]) if np.sum(mask_cyan>0)>0 else 0
+            
+            is_glare = (g_ch > 220) & (b_ch > 220) & (r_ch > 220)
+            is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 220)
+            
+            mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
+            saturated_pixels = np.sum(mask_saturated_valid > 0)
+
+            intensity_raw = np.where(is_glare, 0, np.where(is_saturated_cyan, ((g_ch + b_ch)/2.0 - r_ch*0.8), ((g_ch + b_ch)/2.0 - r_ch*1.7)))
+            intensity_map = np.clip(intensity_raw, 0, 100)
+            
+            denom = p_count if p_count > 0 else np.sum(mask_cyan > 0)
+            cyan_area = (np.sum(mask_cyan>0)/denom*100) if denom > 0 else 0
+            avg_int = np.mean(intensity_map[mask_cyan>0]) if np.sum(mask_cyan>0)>0 else 0
+            
             phi = cyan_area * (avg_int / 10.0)
-            status = "CONTAMINATED" if (phi > 5.0 or np.sum((mask_cyan>0) & ((g_ch>200)&(b_ch>200)&(r_ch<200)).astype(np.uint8))>0) else "SAFE"
+            
+            status = "CONTAMINATED" if (phi > 5.0 or saturated_pixels > 20) else "SAFE"
             if status == "CONTAMINATED" and phi < 5.0: phi = 99.9
             cv_color = (255, 255, 0) if status == "CONTAMINATED" else (0, 255, 0)
 
@@ -167,12 +178,12 @@ def process_frame(img):
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
     return draw_img, reports
 
-# --- [4] UI: 관리자 페이지 ---
+# --- [4] UI 함수 ---
+
 def render_admin_page():
-    st.title("🗂️ 연구 데이터 관리 센터")
-    
+    st.title("🗂️ 관리자 모드")
     log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
-    if not log_files: st.warning("저장된 데이터가 없습니다."); return
+    if not log_files: st.warning("데이터 없음"); return
 
     if 'current_log_file' not in st.session_state or st.session_state.current_log_file not in log_files:
         st.session_state.current_log_file = log_files[0]
@@ -189,20 +200,21 @@ def render_admin_page():
         def update_index(): st.session_state.current_log_file = st.session_state.log_selector
         st.selectbox("파일 선택", log_files, index=current_idx, key='log_selector', on_change=update_index, label_visibility="collapsed")
         
-        # [백업 버튼]
-        if st.button("📦 전체 백업 (ZIP)", use_container_width=True):
-            shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
-            with open("TFCP_Backup.zip", "rb") as fp: st.download_button("📥 다운로드", fp, "TFCP_Backup.zip", "application/zip")
-            
-        # [삭제 버튼]
-        if st.button("🗑️ 현재 데이터 삭제", type="primary", use_container_width=True):
-            log_path_del = os.path.join(LOG_DIR, st.session_state.current_log_file)
-            try:
-                with open(log_path_del, 'r') as f: del_data = json.load(f)
-                if os.path.exists(log_path_del): os.remove(log_path_del)
-                if os.path.exists(os.path.join(IMG_DIR, del_data['filename'])): os.remove(os.path.join(IMG_DIR, del_data['filename']))
-                st.success("삭제됨"); del st.session_state.current_log_file; st.rerun()
-            except: st.error("삭제 실패")
+        # 관리 버튼
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            if st.button("📦 백업 (ZIP)", use_container_width=True):
+                shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
+                with open("TFCP_Backup.zip", "rb") as fp: st.download_button("📥 다운로드", fp, "TFCP_Backup.zip", "application/zip")
+        with bc2:
+            if st.button("🗑️ 삭제", type="primary", use_container_width=True):
+                log_path_del = os.path.join(LOG_DIR, st.session_state.current_log_file)
+                try:
+                    with open(log_path_del, 'r') as f: del_data = json.load(f)
+                    if os.path.exists(log_path_del): os.remove(log_path_del)
+                    if os.path.exists(os.path.join(IMG_DIR, del_data['filename'])): os.remove(os.path.join(IMG_DIR, del_data['filename']))
+                    st.success("삭제됨"); del st.session_state.current_log_file; st.rerun()
+                except: st.error("삭제 실패")
 
     log_path = os.path.join(LOG_DIR, st.session_state.current_log_file)
     try:
@@ -229,9 +241,36 @@ def render_admin_page():
                     if status == "RECHECK REQUIRED": label_text = f"Area {idx + 1}: RECHECK"
                     cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
                 
-                # [적용] 이미지 크기 고정 (800x600)
+                # 이미지 크기 고정
                 display_img = standardize_image_size(draw_img, 800, 600)
                 st.image(display_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
+
+                # 수동 추가 (슬라이더)
+                with st.expander("➕ 수동 영역 지정 (Manual Selection)", expanded=False):
+                    st.info("AI가 놓친 입자를 추가합니다.")
+                    h, w = img_rgb.shape[:2]
+                    mc1, mc2 = st.columns(2)
+                    with mc1:
+                        mx1 = st.slider("X 시작", 0, w, int(w*0.3), key="mx1")
+                        mx2 = st.slider("X 끝", 0, w, int(w*0.7), key="mx2")
+                    with mc2:
+                        my1 = st.slider("Y 시작", 0, h, int(h*0.3), key="my1")
+                        my2 = st.slider("Y 끝", 0, h, int(h*0.7), key="my2")
+                    
+                    preview = draw_img.copy()
+                    cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
+                    # 프리뷰도 리사이즈
+                    st.image(standardize_image_size(preview, 800, 600), caption="영역 미리보기", width=800)
+                    
+                    if st.button("✅ 추가하기"):
+                        if mx1 >= mx2 or my1 >= my2: st.error("범위 오류")
+                        else:
+                            new_particle = {"id": len(particles), "box": [mx1, my1, mx2, my2], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True}
+                            particles.append(new_particle)
+                            data['particles'] = particles
+                            data['reports'] = particles
+                            with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                            st.success("추가됨!"); st.rerun()
 
                 # 수정 폼
                 with st.form("update"):
@@ -253,9 +292,9 @@ def render_admin_page():
                         with open(log_path, 'w') as f: json.dump(data, f, indent=4)
                         st.success("저장됨"); st.rerun()
             else:
-                st.image(img_rgb, caption="입자 없음", width=800) # 너비 고정
+                st.image(standardize_image_size(img_rgb, 800, 600), caption="입자 없음", width=800)
                 st.warning("입자가 없습니다. 수동으로 추가하세요.")
-                if st.button("➕ 중앙에 입자 추가"):
+                if st.button("➕ 중앙에 입자 강제 추가"):
                         h, w = img_rgb.shape[:2]
                         new_p = {"id":0, "box":[int(w*0.3),int(h*0.3),int(w*0.7),int(h*0.7)], "status":"CONTAMINATED", "phi":0, "cyan":0, "orange":0, "manual":True}
                         data['particles'] = [new_p]; data['reports'] = [new_p]
@@ -263,6 +302,20 @@ def render_admin_page():
                         st.rerun()
         else: st.error("이미지 없음")
     except Exception as e: st.error(f"오류: {e}")
+
+# --- [메인 실행 흐름] ---
+if 'admin_mode' not in st.session_state: st.session_state['admin_mode'] = False
+st.sidebar.title("메뉴")
+mode = st.sidebar.radio("이동", ["실시간 분석", "관리자 모드"])
+
+if mode == "관리자 모드":
+    if not st.session_state['admin_mode']:
+        pwd = st.sidebar.text_input("비밀번호", type="password")
+        if pwd == "tfcp2026": st.session_state['admin_mode'] = True; st.rerun()
+        elif pwd: st.error("비밀번호 오류")
+    
+    if st.session_state['admin_mode']:
+        render_admin_page()
 
 elif mode == "실시간 분석":
     st.title("🧪 TFCP 분석기")
@@ -284,7 +337,6 @@ elif mode == "실시간 분석":
                 with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
                     json.dump({"filename":f"{fn}.jpg", "timestamp":ts, "reports":reports, "reviewed":False}, f, indent=4)
                 
-                # [적용] 이미지 크기 고정 (800x600) + RGB 변환
                 display_img = standardize_image_size(res_img, 800, 600)
                 with c1: st.image(cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB), caption="분석 완료", width=800)
                 with c2:
