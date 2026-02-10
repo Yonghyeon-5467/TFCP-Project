@@ -165,14 +165,13 @@ def process_frame(img):
             if status == "CONTAMINATED" and phi < 5.0: phi = 99.9
             cv_color = (255, 255, 0) if status == "CONTAMINATED" else (0, 255, 0)
 
-        # 시각화 (글자 크기 0.6 -> 2.0, 두께 2 -> 5)
         cv2.rectangle(draw_img, (nx1, ny1), (nx2, ny2), cv_color, 4)
         
-        # [수정] Area + 순번 표시 (예: Area 1 : SAFE)
-        label_text = f"Area {i+1} : {status[:4]}"
-        if status == "RECHECK REQUIRED": label_text = f"Area {i+1} : RECHECK"
+        # [수정] 라벨 텍스트: "Area {순번}"으로 변경, 글자 크기 적절히 조절 (0.9, 두께 2)
+        label_text = f"Area {i+1}: {status[:4]}"
+        if status == "RECHECK REQUIRED": label_text = f"Area {i+1}: RECHECK"
         
-        cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 2.0, cv_color, 5)
+        cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, cv_color, 2)
         
         reports.append({
             "id": i, "status": status, "phi": float(round(phi, 2)), 
@@ -186,6 +185,7 @@ def process_frame(img):
 def render_admin_page():
     st.title("🗂️ 연구 데이터 관리 센터")
     
+    # 데이터 목록 표시
     log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
     if not log_files:
         st.warning("저장된 데이터가 없습니다.")
@@ -215,6 +215,7 @@ def render_admin_page():
             img_path = os.path.join(IMG_DIR, img_name)
             
             if os.path.exists(img_path):
+                # 이미지 및 현재 상태 시각화
                 image_raw = cv2.imread(img_path)
                 image_corrected = apply_gamma_correction(image_raw, gamma=0.8)
                 image_rgb = cv2.cvtColor(image_corrected, cv2.COLOR_BGR2RGB)
@@ -235,31 +236,16 @@ def render_admin_page():
                         
                         cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
                         
-                        # [수정] 관리자 모드 시각화 (글자 크기 1.2 -> 2.5, 두께 3 -> 6)
-                        label_text = f"Area {p_id + 1} : {status[:4]}"
-                        if status == "RECHECK REQUIRED": label_text = f"Area {p_id + 1} : RECHECK"
+                        # [수정] 관리자 모드 시각화: "Area {순번}" 적용, 글자 크기 0.9로 조정
+                        label_text = f"Area {p_id + 1}: {status[:4]}"
+                        if status == "RECHECK REQUIRED": label_text = f"Area {p_id + 1}: RECHECK"
                         
-                        cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 2.5, color, 6)
+                        cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
                     
                     st.image(draw_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", use_container_width=True)
                     
+                    # 수정 폼
                     st.write("#### 📝 판정 결과 수정")
-                    
-                    if st.button("➕ 입자 강제 추가 (AI 미검출 시)"):
-                        h, w = draw_img.shape[:2]
-                        new_id = len(particles)
-                        new_particle = {
-                            "id": new_id,
-                            "box": [int(w*0.3), int(h*0.3), int(w*0.7), int(h*0.7)],
-                            "status": "CONTAMINATED", 
-                            "phi": 0, "cyan": 0, "orange": 0
-                        }
-                        particles.append(new_particle)
-                        data['particles'] = particles
-                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                        st.success("새로운 영역이 추가되었습니다.")
-                        st.rerun()
-
                     with st.form("correction_form"):
                         updated_particles = []
                         cols = st.columns(2)
@@ -268,6 +254,7 @@ def render_admin_page():
                                 status = p.get('status', 'SAFE')
                                 st_color = "green" if status == "SAFE" else "red" if status == "CONTAMINATED" else "orange"
                                 
+                                # [수정] 폼 라벨도 Area로 변경
                                 st.markdown(f"**Area {p.get('id', i) + 1}** : <span style='color:{st_color}'><b>{status}</b></span>", unsafe_allow_html=True)
                                 
                                 options = ["SAFE", "CONTAMINATED", "RECHECK REQUIRED"]
@@ -347,6 +334,7 @@ elif mode == "실시간 분석":
             if reports:
                 for r in reports:
                     c = "red" if r['status']=="CONTAMINATED" else "green" if r['status']=="SAFE" else "orange"
+                    # [수정] 결과 카드에도 Area {id+1} 적용
                     st.markdown(f'<div style="border:2px solid {c}; padding:5px; margin:5px; border-radius:5px;">Area {r["id"]+1}: <b>{r["status"]}</b><br>Phi: {r["phi"]}</div>', unsafe_allow_html=True)
             else:
                 st.warning("입자 없음")
