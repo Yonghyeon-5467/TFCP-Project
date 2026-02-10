@@ -30,7 +30,6 @@ def load_model():
 model = load_model()
 
 # --- [3] 핵심 분석 엔진 (v10.2.1 로직) ---
-# (분석 로직은 동일하게 유지하되, 일부 헬퍼 함수 생략 없이 포함)
 
 def apply_gamma_correction(image, gamma=0.8):
     invGamma = 1.0 / gamma
@@ -178,12 +177,21 @@ def process_frame(img):
 
     return draw_img, reports
 
-# --- [관리자 페이지: 데이터 검수 및 다운로드] ---
+# --- [4] UI: 관리자 페이지 (Safe Guard 적용) ---
 def render_admin_page():
     st.title("🗂️ 연구 데이터 관리 센터")
     
-    # 1. 데이터 목록 표시
+    # 꼬인 데이터 초기화 버튼
+    if st.button("⚠️ 모든 데이터 초기화 (주의: 삭제됨)"):
+        if os.path.exists(LOG_DIR):
+            shutil.rmtree(LOG_DIR)
+            os.makedirs(LOG_DIR)
+        st.success("데이터가 초기화되었습니다.")
+        st.rerun()
+
+    # 데이터 목록 로드
     log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
+    
     if not log_files:
         st.warning("저장된 분석 데이터가 없습니다.")
         return
@@ -195,7 +203,7 @@ def render_admin_page():
     with col_list:
         selected_log = st.selectbox("분석 기록 선택", log_files, index=0)
         
-        # [기능 1] 전체 데이터 다운로드 버튼
+        # 전체 데이터 다운로드 버튼
         if st.button("📦 전체 데이터 백업 (ZIP)"):
             shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
             with open("TFCP_Backup.zip", "rb") as fp:
@@ -209,50 +217,90 @@ def render_admin_page():
     with col_view:
         if selected_log:
             log_path = os.path.join(LOG_DIR, selected_log)
-            with open(log_path, 'r') as f:
-                data = json.load(f)
+            try:
+                with open(log_path, 'r') as f:
+                    data = json.load(f)
+            except json.JSONDecodeError:
+                st.error("손상된 로그 파일입니다.")
+                return
             
-            img_path = os.path.join(IMG_DIR, data['filename'])
+            img_name = data.get('filename')
+            img_path = os.path.join(IMG_DIR, img_name)
+            
             if os.path.exists(img_path):
                 # 이미지 및 현재 상태 시각화
                 image = Image.open(img_path)
                 img_np = np.array(image)
                 draw_img = img_np.copy()
                 
-                for p in data['particles']:
-                    x1, y1, x2, y2 = p['box']
-                    status = p.get('status', 'SAFE')
-                    color = (255, 0, 0) if status == "CONTAMINATED" else (0, 255, 0)
-                    if status == "RECHECK REQUIRED": color = (255, 165, 0)
-                    cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
-                    cv2.putText(draw_img, f"ID:{p['id']}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 3)
+                # 입자가 없는 경우에 대한 방어 코드
+                particles = data.get('particles', [])
                 
-                st.image(draw_img, caption=f"File: {data['filename']}", use_container_width=True)
-                
-                # [기능 2] 데이터 수정 (Labeling)
-                st.write("#### 📝 판정 결과 수정")
-                with st.form("correction_form"):
-                    updated_particles = []
-                    cols = st.columns(2)
-                    for i, p in enumerate(data['particles']):
-                        with cols[i % 2]:
-                            st.info(f"**ID {p['id']}** (AI: {p['status']})")
-                            new_status = st.radio(
-                                "Correct Status:",
-                                ["SAFE", "CONTAMINATED", "RECHECK REQUIRED"],
-                                index=["SAFE", "CONTAMINATED", "RECHECK REQUIRED"].index(p.get('status', 'SAFE')),
-                                key=f"p_{i}"
-                            )
-                            p['status'] = new_status
-                            updated_particles.append(p)
+                if particles:
+                    for p in particles:
+                        # [Safe Guard] 좌표 데이터가 없을 경우 패스
+                        if 'box' not in p: continue
+                        
+                        x1, y1, x2, y2 = p['box']
+                        status = p.get('status', 'SAFE')
+                        
+                        # 색상 설정
+                        color = (255, 0, 0) # Red (기본값)
+                        if status == "CONTAMINATED": color = (255, 0, 0)
+                        elif status == "SAFE": color = (0, 255, 0)
+                        elif status == "RECHECK REQUIRED": color = (255, 165, 0)
+                        
+                        cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
+                        cv2.putText(draw_img, f"ID:{p['id']}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 3)
                     
-                    if st.form_submit_button("✅ 수정 사항 저장"):
-                        data['particles'] = updated_particles
-                        data['reviewed'] = True
-                        with open(log_path, 'w') as f:
-                            json.dump(data, f, indent=4)
-                        st.success("데이터가 수정되었습니다!")
-                        st.rerun()
+                    st.image(draw_img, caption=f"File: {data['filename']}", use_container_width=True)
+                    
+                    # 데이터 수정 폼
+                    st.write("#### 📝 판정 결과 수정")
+                    with st.form("correction_form"):
+                        updated_particles = []
+                        cols = st.columns(2)
+                        
+                        for i, p in enumerate(particles):
+                            with cols[i % 2]:
+                                # [Safe Guard] .get()을 사용하여 없는 키에 대한 에러 방지
+                                status = p.get('status', 'SAFE')
+                                phi = p.get('phi', 0)
+                                cyan = p.get('cyan', 0)
+                                orange = p.get('orange', 0)
+                                
+                                st.info(f"**ID {p.get('id', i)}** (AI: {status})")
+                                st.caption(f"Phi: {phi} | Cyan: {cyan}% | Orange: {orange}%")
+                                
+                                options = ["SAFE", "CONTAMINATED", "RECHECK REQUIRED"]
+                                # 현재 상태가 옵션에 없으면 기본값 SAFE로 설정 (오류 방지)
+                                try:
+                                    idx = options.index(status)
+                                except ValueError:
+                                    idx = 0
+                                    
+                                new_status = st.radio(
+                                    "Correct Status:",
+                                    options,
+                                    index=idx,
+                                    key=f"p_{i}"
+                                )
+                                p['status'] = new_status
+                                updated_particles.append(p)
+                        
+                        if st.form_submit_button("✅ 수정 사항 저장"):
+                            data['particles'] = updated_particles
+                            data['reviewed'] = True
+                            with open(log_path, 'w') as f:
+                                json.dump(data, f, indent=4)
+                            st.success("데이터가 수정되었습니다!")
+                            st.rerun()
+                else:
+                    st.image(image, caption=f"File: {data['filename']} (입자 없음)", use_container_width=True)
+                    st.warning("이 이미지에서는 감지된 입자가 없습니다.")
+                    
+            else:
+                st.error(f"이미지 파일을 찾을 수 없습니다: {img_name}")
 
 # --- [메인 UI] ---
 if 'admin_mode' not in st.session_state:
@@ -265,7 +313,7 @@ mode = st.sidebar.radio("이동", ["실시간 분석", "관리자 모드"])
 if mode == "관리자 모드":
     if not st.session_state['admin_mode']:
         pwd = st.sidebar.text_input("관리자 비밀번호", type="password")
-        if pwd == "yh5467":
+        if pwd == "tfcp2026":
             st.session_state['admin_mode'] = True
             st.rerun()
     else:
@@ -303,4 +351,3 @@ elif mode == "실시간 분석":
                     st.markdown(f'<div style="border:2px solid {c}; padding:5px; margin:5px; border-radius:5px;">ID {r["id"]}: <b>{r["status"]}</b><br>Phi: {r["phi"]}</div>', unsafe_allow_html=True)
             else:
                 st.warning("입자 없음")
-
