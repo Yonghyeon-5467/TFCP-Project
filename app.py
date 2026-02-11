@@ -8,24 +8,9 @@ import json
 import shutil
 from datetime import datetime
 import pandas as pd
-from streamlit_drawable_canvas import st_canvas
 
-st.set_page_config(page_title="TFCP Quantitative Analysis System", page_icon="🔬", layout="wide")
-
-st.markdown("""
-    <style>
-        .main { background-color: #f8f9fa; }
-        .stButton>button { width: 100%; border-radius: 5px; font-weight: 600; }
-        .metric-card {
-            background-color: white; border: 1px solid #e0e0e0; border-radius: 8px;
-            padding: 15px; margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }
-        .status-safe { color: #28a745; font-weight: bold; }
-        .status-cont { color: #dc3545; font-weight: bold; }
-        .status-warn { color: #fd7e14; font-weight: bold; }
-        .header-text { font-family: 'Helvetica', sans-serif; font-weight: 700; color: #333; }
-    </style>
-""", unsafe_allow_html=True)
+# --- [1] 페이지 및 기본 설정 ---
+st.set_page_config(page_title="TFCP Data Manager", page_icon="🧪", layout="wide")
 
 SAVE_ROOT = "TFCP_Data"
 IMG_DIR = os.path.join(SAVE_ROOT, "raw_images")
@@ -34,6 +19,7 @@ LOG_DIR = os.path.join(SAVE_ROOT, "analysis_logs")
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 if not os.path.exists(LOG_DIR): os.makedirs(LOG_DIR)
 
+# --- [2] 모델 로드 ---
 @st.cache_resource
 def load_model():
     if os.path.exists('best.pt'):
@@ -42,12 +28,16 @@ def load_model():
 
 model = load_model()
 
+# --- [3] 핵심 분석 엔진 ---
+
 def apply_gamma_correction(image, gamma=0.8):
+    """과노출 보정"""
     invGamma = 1.0 / gamma
     table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
     return cv2.LUT(image, table)
 
 def standardize_image_size(img, target_width=800, target_height=600):
+    """이미지 크기 고정 (Letterbox)"""
     h, w = img.shape[:2]
     scale = min(target_width/w, target_height/h)
     nw, nh = int(w*scale), int(h*scale)
@@ -91,6 +81,7 @@ def filter_nested_boxes(boxes):
     return [boxes[idx] for idx in keep_indices]
 
 def detect_particles_heuristically(img):
+    """AI 실패 시 백업 탐지"""
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     mask_o = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([60, 255, 255]))
     mask_c = cv2.inRange(hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
@@ -128,7 +119,7 @@ def process_frame(img):
         if (x2-x1) < 50 or (y2-y1) < 50: continue
         roi_hsv = hsv[max(0,y1):min(img_h,y2), max(0,x1):min(img_w,x2)]
         if roi_hsv.size == 0: continue
-        if np.sum(cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([60, 255, 255]))) + np.sum(cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))) > 200:
+        if np.sum(cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([55, 255, 255]))) + np.sum(cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))) > 200:
             combined_boxes.append((box, "AI"))
 
     if not combined_boxes:
@@ -159,13 +150,13 @@ def process_frame(img):
         orange_area_pct = (p_count/box_area)*100 if box_area>0 else 0
 
         if p_count < 100 or orange_area_pct < 3.0:
-            status = "RECHECK REQUIRED"; cv_color = (0, 165, 255); phi = 0; cyan_area = 0
-            avg_int = 0
+            status = "RECHECK REQUIRED"; cv_color = (0, 165, 255); phi = 0; cyan_area = 0; avg_int = 0
         else:
             mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3,3), np.uint8), iterations=1)
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
             
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
+            
             is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
             is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
             
@@ -185,12 +176,12 @@ def process_frame(img):
 
         cv2.rectangle(draw_img, (nx1, ny1), (nx2, ny2), cv_color, 4)
         label_text = f"Area {i+1}: {status[:4]}" if status != "RECHECK REQUIRED" else f"Area {i+1}: RECHECK"
-        # 폰트 크기 0.9 -> 1.5, 두께 2 -> 3 으로 확대
-        cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 1.5, cv_color, 3)
+        cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, cv_color, 2)
         
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
     return draw_img, reports
 
+# --- UI ---
 def render_admin_page():
     st.markdown("<h2 class='header-text'>Research Data Management Center</h2>", unsafe_allow_html=True)
     
@@ -215,10 +206,9 @@ def render_admin_page():
         
         bc1, bc2 = st.columns(2)
         with bc1:
-            if st.button("📦 Archive (ZIP)"):
-                shutil.make_archive("TFCP_Dataset", 'zip', SAVE_ROOT)
-                with open("TFCP_Dataset.zip", "rb") as fp:
-                    st.download_button("Download ZIP", fp, "TFCP_Dataset.zip", "application/zip")
+            if st.button("📦 Archive (ZIP)", use_container_width=True):
+                shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
+                with open("TFCP_Backup.zip", "rb") as fp: st.download_button("Download ZIP", fp, "TFCP_Backup.zip", "application/zip")
         with bc2:
             if st.button("🗑️ Delete", type="primary"):
                 try:
@@ -234,7 +224,6 @@ def render_admin_page():
     try:
         with open(log_path, 'r') as f: data = json.load(f)
         img_path = os.path.join(IMG_DIR, data['filename'])
-        
         if os.path.exists(img_path):
             img_bgr = cv2.imread(img_path)
             img_corrected = apply_gamma_correction(img_bgr, gamma=0.8)
@@ -242,27 +231,23 @@ def render_admin_page():
             draw_img = img_rgb.copy()
             
             particles = data.get('particles', data.get('reports', []))
+            
             if particles:
                 for idx, p in enumerate(particles):
                     if 'box' not in p: continue
                     x1,y1,x2,y2 = p['box']
                     status = p.get('status', 'SAFE')
-                    
                     color = (0, 255, 0)
                     if status == "CONTAMINATED": color = (255, 0, 0)
                     elif status == "RECHECK REQUIRED": color = (255, 165, 0)
-                    
                     cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
-                    label_txt = f"Area {idx+1}: {status[:4]}"
-                    if status == "RECHECK REQUIRED": label_txt = f"Area {idx+1}: RECHECK"
-                    # 폰트 크기 0.9 -> 1.5, 두께 2 -> 3 으로 확대
-                    cv2.putText(draw_img, label_txt, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
+                    label_text = f"Area {idx+1}: {status[:4]}"
+                    if status == "RECHECK REQUIRED": label_text = f"Area {idx+1}: RECHECK"
+                    cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
                 
-                display_img = standardize_image_size(draw_img, 800, 600)
-                st.image(display_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
+                st.image(standardize_image_size(draw_img, 800, 600), caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
 
-                # [슬라이더 방식] 수동 영역 지정 (Manual Selection)
-                with st.expander("➕ Manual Region Injection", expanded=False):
+                with st.expander("➕ Manual Region Injection (Slider)", expanded=False):
                     st.info("Manually add a region if AI missed a particle.")
                     h, w = img_rgb.shape[:2]
                     mc1, mc2 = st.columns(2)
@@ -282,7 +267,7 @@ def render_admin_page():
                         particles.append(new_p)
                         data['particles'] = particles
                         with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                        st.success("Region Injected!"); st.rerun()
+                        st.success("Injected!"); st.rerun()
 
                 with st.form("update"):
                     st.markdown("#### Annotation Correction")
@@ -312,8 +297,8 @@ def render_admin_page():
                      data['particles'] = [new_p]; data['reports'] = [new_p]
                      with open(log_path, 'w') as f: json.dump(data, f, indent=4)
                      st.rerun()
-        else: st.error("Image file missing")
-    except Exception as e: st.error(f"Error loading data: {e}")
+        else: st.error("Image missing")
+    except Exception as e: st.error(f"Error: {e}")
 
 if 'admin_mode' not in st.session_state: st.session_state['admin_mode'] = False
 st.sidebar.title("Navigation")
