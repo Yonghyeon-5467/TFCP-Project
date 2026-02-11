@@ -28,14 +28,14 @@ def load_model():
 
 model = load_model()
 
-# --- [3] 핵심 분석 엔진 (v10.2.1 Original Logic) ---
+# --- [3] 핵심 분석 엔진 (v10.2.1 Logic Based) ---
 
 def apply_gamma_correction(image, gamma=0.8):
     invGamma = 1.0 / gamma
     table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
     return cv2.LUT(image, table)
 
-# [요청 기능 1] 이미지 크기 고정 (Letterbox)
+# [기능 1] 이미지 크기 고정 (Letterbox)
 def standardize_image_size(img, target_width=800, target_height=600):
     h, w = img.shape[:2]
     scale = min(target_width/w, target_height/h)
@@ -133,7 +133,8 @@ def process_frame(img):
         if roi_hsv.size == 0: continue
         
         valid_mask = (roi_hsv[:,:,1]>25) & (roi_hsv[:,:,2]>25)
-        # v10.2.1의 색상 기준 복구 (Orange 0-60, Cyan 80-165)
+        
+        # v10.2.1 색상 범위
         mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([60, 255, 255]))
         mask_cyan_candidate = cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
         
@@ -148,20 +149,20 @@ def process_frame(img):
         box_area = (nx2-nx1)*(ny2-ny1)
         orange_area_pct = (p_count/box_area)*100 if box_area>0 else 0
 
-        # v10.2.1 가드 로직
+        # v10.2.1 가드 로직: 주황색 밀도 부족 시 RECHECK
         if p_count < 100 or orange_area_pct < 3.0:
             status = "RECHECK REQUIRED"; cv_color = (0, 165, 255); phi = 0; cyan_area = 0
             avg_int = 0
         else:
-            # v10.2.1 엄격한 포함 조건 (3px 팽창)
+            # v10.2.1 엄격한 포함 조건
             mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3,3), np.uint8), iterations=1)
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
             
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
-            # v10.2.1 과노출 판정 (G,B > 200, R < 200)
+            
+            # v10.2.1 과노출(Saturation) 판정
             is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
             is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
-            
             mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
             saturated_pixels = np.sum(mask_saturated_valid > 0)
 
@@ -177,7 +178,7 @@ def process_frame(img):
             cv_color = (255, 255, 0) if status == "CONTAMINATED" else (0, 255, 0)
 
         cv2.rectangle(draw_img, (nx1, ny1), (nx2, ny2), cv_color, 4)
-        label_text = f"{status[:4]} P:{phi:.1f}"
+        label_text = f"Area {i+1}: {status[:4]}" if status != "RECHECK REQUIRED" else f"Area {i+1}: RECHECK"
         cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, cv_color, 2)
         
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
@@ -217,7 +218,7 @@ if mode == "관리자 모드":
             if st.button("📦 백업 (ZIP)", use_container_width=True):
                 shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
                 with open("TFCP_Backup.zip", "rb") as fp: st.download_button("📥 다운로드", fp, "TFCP_Backup.zip", "application/zip")
-        # [요청 기능 2] 삭제 기능 추가
+        # [기능 2] 삭제 기능 추가
         with bc2:
             if st.button("🗑️ 삭제", type="primary", use_container_width=True):
                 log_path_del = os.path.join(LOG_DIR, st.session_state.current_log_file)
@@ -245,47 +246,58 @@ if mode == "관리자 모드":
                         if 'box' not in p: continue
                         x1,y1,x2,y2 = p['box']
                         status = p.get('status', 'SAFE')
+                        
                         color = (0, 255, 0)
                         if status == "CONTAMINATED": color = (255, 0, 0)
                         elif status == "RECHECK REQUIRED": color = (255, 165, 0)
+                        
                         cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
-                        label_text = f"ID:{idx} {status[:4]}"
+                        label_text = f"Area {idx + 1}: {status[:4]}"
+                        if status == "RECHECK REQUIRED": label_text = f"Area {idx + 1}: RECHECK"
                         cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
                     
-                    # [요청 기능 1] 이미지 크기 고정 (800x600)
+                    # [기능 1] 이미지 크기 고정 (800x600)
                     display_img = standardize_image_size(draw_img, 800, 600)
                     st.image(display_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
 
-                    # [수동 추가 - 슬라이더 유지]
-                    with st.expander("➕ 수동 영역 지정", expanded=False):
+                    # [수동 추가 - 슬라이더]
+                    with st.expander("➕ 수동 영역 지정 (Manual Selection)", expanded=False):
+                        st.info("AI가 놓친 입자를 수동으로 추가합니다.")
                         h, w = img_rgb.shape[:2]
                         mc1, mc2 = st.columns(2)
                         with mc1:
-                            mx1 = st.slider("X Start", 0, w, int(w*0.3), key="mx1")
-                            mx2 = st.slider("X End", 0, w, int(w*0.7), key="mx2")
+                            mx1 = st.slider("X 시작", 0, w, int(w*0.3), key="mx1")
+                            mx2 = st.slider("X 끝", 0, w, int(w*0.7), key="mx2")
                         with mc2:
-                            my1 = st.slider("Y Start", 0, h, int(h*0.3), key="my1")
-                            my2 = st.slider("Y End", 0, h, int(h*0.7), key="my2")
+                            my1 = st.slider("Y 시작", 0, h, int(h*0.3), key="my1")
+                            my2 = st.slider("Y 끝", 0, h, int(h*0.7), key="my2")
+                        
                         preview = draw_img.copy()
                         cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
-                        st.image(standardize_image_size(preview, 800, 600), width=800)
+                        st.image(standardize_image_size(preview, 800, 600), caption="영역 미리보기", width=800)
+                        
                         if st.button("✅ 추가하기"):
-                            new_particle = {"id": len(particles), "box": [mx1, my1, mx2, my2], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True}
-                            particles.append(new_particle)
-                            data['particles'] = particles
-                            data['reports'] = particles
-                            with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                            st.rerun()
+                            if mx1 >= mx2 or my1 >= my2:
+                                st.error("범위 오류")
+                            else:
+                                new_particle = {"id": len(particles), "box": [mx1, my1, mx2, my2], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True}
+                                particles.append(new_particle)
+                                data['particles'] = particles
+                                data['reports'] = particles
+                                with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                                st.success("추가됨!")
+                                st.rerun()
 
+                    # 수정 폼
                     with st.form("update"):
                         new_parts = []
                         cols = st.columns(2)
                         for i, p in enumerate(particles):
                             with cols[i%2]:
                                 stat = p.get('status','SAFE')
-                                st.write(f"**ID {i}**: {stat}")
+                                st.write(f"**Area {i+1}**: {stat}")
                                 idx = ["SAFE","CONTAMINATED","RECHECK REQUIRED"].index(stat) if stat in ["SAFE","CONTAMINATED","RECHECK REQUIRED"] else 0
-                                new_stat = st.radio("Status", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
+                                new_stat = st.radio("상태", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
                                 p['status'] = new_stat
                                 p['id'] = i
                                 new_parts.append(p)
@@ -294,18 +306,19 @@ if mode == "관리자 모드":
                             data['reports'] = new_parts
                             data['reviewed'] = True
                             with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                            st.success("저장됨"); st.rerun()
+                            st.success("저장됨")
+                            st.rerun()
                 else:
-                    st.image(standardize_image_size(img_rgb, 800, 600), width=800)
-                    st.warning("입자가 없습니다.")
-                    if st.button("➕ 중앙에 추가"):
+                    st.image(standardize_image_size(img_rgb, 800, 600), caption="입자 없음", width=800)
+                    st.warning("입자가 없습니다. 수동으로 추가하세요.")
+                    if st.button("➕ 중앙에 입자 추가"):
                          h, w = img_rgb.shape[:2]
                          new_p = {"id":0, "box":[int(w*0.3),int(h*0.3),int(w*0.7),int(h*0.7)], "status":"CONTAMINATED", "phi":0, "cyan":0, "orange":0, "manual":True}
                          data['particles'] = [new_p]; data['reports'] = [new_p]
                          with open(log_path, 'w') as f: json.dump(data, f, indent=4)
                          st.rerun()
             else: st.error("이미지 없음")
-        except Exception as e: st.error(f"오류: {e}")
+        except Exception as e: st.error(f"데이터 오류: {e}")
 
 elif mode == "실시간 분석":
     st.title("🧪 TFCP 분석기")
@@ -334,6 +347,6 @@ elif mode == "실시간 분석":
                     if reports:
                         for r in reports:
                             clr = "red" if r['status']=="CONTAMINATED" else "green" if r['status']=="SAFE" else "orange"
-                            st.markdown(f'<div style="border:2px solid {clr}; padding:5px; margin:5px; border-radius:5px;">ID {r["id"]}: <b>{r["status"]}</b><br>Phi: {r["phi"]}</div>', unsafe_allow_html=True)
+                            st.markdown(f'<div style="border:2px solid {clr}; padding:5px; margin:5px; border-radius:5px;">Area {r["id"]+1}: <b>{r["status"]}</b><br>Phi: {r["phi"]}</div>', unsafe_allow_html=True)
                     else: st.warning("입자 없음")
             except Exception as e: st.error(f"오류: {e}")
