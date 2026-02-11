@@ -8,7 +8,6 @@ import json
 import shutil
 from datetime import datetime
 import pandas as pd
-# [중요] 드래그 라이브러리 import 제거함
 
 # --- [1] 페이지 및 기본 설정 ---
 st.set_page_config(page_title="TFCP Data Manager", page_icon="🧪", layout="wide")
@@ -29,7 +28,7 @@ def load_model():
 
 model = load_model()
 
-# --- [3] 핵심 분석 엔진 (Smart Logic) ---
+# --- [3] 핵심 분석 엔진 (v10.2.1 Logic + Helper) ---
 
 def apply_gamma_correction(image, gamma=0.8):
     """과노출 보정"""
@@ -82,10 +81,9 @@ def filter_nested_boxes(boxes):
     return [boxes[idx] for idx in keep_indices]
 
 def detect_particles_heuristically(img):
-    """AI 실패 시 백업 탐지"""
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask_o = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([65, 255, 255]))
-    mask_c = cv2.inRange(hsv, np.array([75, 30, 30]), np.array([170, 255, 255]))
+    mask_o = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([60, 255, 255]))
+    mask_c = cv2.inRange(hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
     combined = cv2.bitwise_or(mask_o, mask_c)
     kernel = np.ones((25,25), np.uint8)
     combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
@@ -97,7 +95,7 @@ def detect_particles_heuristically(img):
             self.xyxy = torch.tensor([coords], dtype=torch.float32)
             self.conf = torch.tensor([0.15])
     for cnt in contours:
-        if cv2.contourArea(cnt) > 2000:
+        if cv2.contourArea(cnt) > 3000:
             x, y, w, h = cv2.boundingRect(cnt)
             aspect_ratio = float(w)/h if h>0 else 0
             if 0.2 < aspect_ratio < 5.0:
@@ -117,10 +115,10 @@ def process_frame(img):
     combined_boxes = []
     for box in ai_raw_boxes:
         coords = box.xyxy[0].cpu().numpy().flatten(); x1, y1, x2, y2 = map(int, coords)
-        if (x2-x1) < 40 or (y2-y1) < 40: continue
+        if (x2-x1) < 50 or (y2-y1) < 50: continue
         roi_hsv = hsv[max(0,y1):min(img_h,y2), max(0,x1):min(img_w,x2)]
         if roi_hsv.size == 0: continue
-        if np.sum(cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([65, 255, 255]))) + np.sum(cv2.inRange(roi_hsv, np.array([75, 30, 30]), np.array([170, 255, 255]))) > 100:
+        if np.sum(cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([60, 255, 255]))) + np.sum(cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))) > 200:
             combined_boxes.append((box, "AI"))
 
     if not combined_boxes:
@@ -136,30 +134,34 @@ def process_frame(img):
         if roi_hsv.size == 0: continue
         
         valid_mask = (roi_hsv[:,:,1]>25) & (roi_hsv[:,:,2]>25)
-        mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([65, 255, 255]))
-        mask_cyan_candidate = cv2.inRange(roi_hsv, np.array([75, 30, 30]), np.array([170, 255, 255]))
+        mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([60, 255, 255]))
+        mask_cyan_candidate = cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
         
         mask_particle_body = np.zeros_like(mask_orange)
-        contours, _ = cv2.findContours(cv2.morphologyEx(mask_orange & (valid_mask.astype(np.uint8)*255), cv2.MORPH_CLOSE, np.ones((5,5), np.uint8)), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        p_count = sum(cv2.contourArea(cnt) for cnt in contours if cv2.contourArea(cnt) > 20)
+        closed_orange = cv2.morphologyEx(mask_orange & (valid_mask.astype(np.uint8)*255), cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
+        contours, _ = cv2.findContours(closed_orange, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        p_count = 0
+        for cnt in contours:
+            if cv2.contourArea(cnt) > 20:
+                cv2.drawContours(mask_particle_body, [cnt], -1, 255, -1)
+                p_count += cv2.contourArea(cnt)
         
         box_area = (nx2-nx1)*(ny2-ny1)
         orange_area_pct = (p_count/box_area)*100 if box_area>0 else 0
 
-        # RECHECK 조건
-        if p_count < 50 and method == "AI":
+        # [v10.2.1] Density & Area Check
+        if p_count < 100 or orange_area_pct < 3.0:
             status = "RECHECK REQUIRED"; cv_color = (0, 165, 255); phi = 0; cyan_area = 0
             avg_int = 0
         else:
-            mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((5,5), np.uint8), iterations=3)
-            if p_count < 50: mask_containment_zone = np.ones_like(mask_orange) * 255
+            mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3,3), np.uint8), iterations=1)
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
             
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
+            is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
+            is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
             
-            # 과노출 독립 판별
-            is_glare = (g_ch > 220) & (b_ch > 220) & (r_ch > 220)
-            is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 220)
             mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
             saturated_pixels = np.sum(mask_saturated_valid > 0)
 
@@ -181,7 +183,7 @@ def process_frame(img):
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
     return draw_img, reports
 
-# --- UI (Admin: Slider Mode) ---
+# --- UI (Admin Mode: Slider Version) ---
 if 'admin_mode' not in st.session_state: st.session_state['admin_mode'] = False
 st.sidebar.title("메뉴")
 mode = st.sidebar.radio("이동", ["실시간 분석", "관리자 모드"])
@@ -242,9 +244,11 @@ if mode == "관리자 모드":
                         if 'box' not in p: continue
                         x1,y1,x2,y2 = p['box']
                         status = p.get('status', 'SAFE')
+                        
                         color = (0, 255, 0)
                         if status == "CONTAMINATED": color = (255, 0, 0)
                         elif status == "RECHECK REQUIRED": color = (255, 165, 0)
+                        
                         cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
                         label_text = f"Area {idx + 1}: {status[:4]}"
                         if status == "RECHECK REQUIRED": label_text = f"Area {idx + 1}: RECHECK"
@@ -304,7 +308,7 @@ if mode == "관리자 모드":
                          with open(log_path, 'w') as f: json.dump(data, f, indent=4)
                          st.rerun()
             else: st.error("이미지 없음")
-        except Exception as e: st.error(f"오류: {e}")
+        except Exception as e: st.error(f"데이터 오류: {e}")
 
 elif mode == "실시간 분석":
     st.title("🧪 TFCP 분석기")
