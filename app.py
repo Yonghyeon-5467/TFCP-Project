@@ -200,8 +200,8 @@ def process_frame(img):
         cv2.rectangle(draw_img, (nx1, ny1), (nx2, ny2), cv_color, 4)
         label_text = f"Area {i+1}: {status[:4]}" if status != "RECHECK REQUIRED" else f"Area {i+1}: RECHECK"
         
-        # [Font Update] Size: 3.0, Thickness: 3
-        cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 3.0, cv_color, 3)
+        # [Font Update] Size: 5.0, Thickness: 5, Anti-Aliasing applied
+        cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 5.0, cv_color, 5, cv2.LINE_AA)
         
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
     return draw_img, reports
@@ -235,13 +235,14 @@ def render_admin_page():
                 shutil.make_archive("TFCP_Dataset", 'zip', SAVE_ROOT)
                 with open("TFCP_Dataset.zip", "rb") as fp: st.download_button("Download ZIP", fp, "TFCP_Dataset.zip", "application/zip")
         with bc2:
-            if st.button("🗑️ Delete", type="primary", use_container_width=True):
-                log_path_del = os.path.join(LOG_DIR, st.session_state.current_log_file)
+            if st.button("🗑️ Delete", type="primary"):
                 try:
-                    with open(log_path_del, 'r') as f: del_data = json.load(f)
-                    if os.path.exists(log_path_del): os.remove(log_path_del)
-                    if os.path.exists(os.path.join(IMG_DIR, del_data['filename'])): os.remove(os.path.join(IMG_DIR, del_data['filename']))
-                    st.success("Deleted."); del st.session_state.current_log_file; st.rerun()
+                    f_path = os.path.join(LOG_DIR, st.session_state.current_log_file)
+                    with open(f_path,'r') as f: d = json.load(f)
+                    if os.path.exists(f_path): os.remove(f_path)
+                    img_p = os.path.join(IMG_DIR, d['filename'])
+                    if os.path.exists(img_p): os.remove(img_p)
+                    st.success("Deleted"); del st.session_state.current_log_file; st.rerun()
                 except: st.error("Delete failed")
 
     log_path = os.path.join(LOG_DIR, st.session_state.current_log_file)
@@ -271,8 +272,8 @@ def render_admin_page():
                     label_text = f"Area {idx + 1}: {status[:4]}"
                     if status == "RECHECK REQUIRED": label_text = f"Area {idx + 1}: RECHECK"
                     
-                    # [Font Update] Size: 3.0, Thickness: 3
-                    cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 3.0, color, 3)
+                    # [Font Update] Size: 5.0, Thickness: 5, Anti-Aliasing
+                    cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 5.0, color, 5, cv2.LINE_AA)
                 
                 display_img = standardize_image_size(draw_img, 800, 600)
                 st.image(display_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
@@ -320,7 +321,7 @@ def render_admin_page():
                         data['reports'] = new_parts
                         data['reviewed'] = True
                         with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                        st.success("Saved!"); st.rerun()
+                        st.success("Annotations Saved!"); st.rerun()
             else:
                 st.image(standardize_image_size(img_rgb, 800, 600), caption="No particles", width=800)
                 st.warning("No particles found.")
