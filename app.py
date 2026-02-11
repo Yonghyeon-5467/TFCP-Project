@@ -2,7 +2,7 @@ import streamlit as st
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import os
 import json
 import shutil
@@ -43,7 +43,7 @@ def load_model():
 
 model = load_model()
 
-# --- [3] Core Analysis Engine (v10.2.1 Logic) ---
+# --- [3] Core Analysis Engine ---
 
 def apply_gamma_correction(image, gamma=0.8):
     """Gamma correction for exposure adjustment."""
@@ -56,7 +56,7 @@ def standardize_image_size(img, target_width=800, target_height=600):
     h, w = img.shape[:2]
     scale = min(target_width/w, target_height/h)
     nw, nh = int(w*scale), int(h*scale)
-    resized = cv2.resize(img, (nw, nh))
+    resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
     
     delta_w = target_width - nw
     delta_h = target_height - nh
@@ -98,8 +98,8 @@ def filter_nested_boxes(boxes):
 def detect_particles_heuristically(img):
     """CV Backup detection."""
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask_o = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([60, 255, 255]))
-    mask_c = cv2.inRange(hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
+    mask_o = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([65, 255, 255]))
+    mask_c = cv2.inRange(hsv, np.array([75, 30, 30]), np.array([170, 255, 255]))
     combined = cv2.bitwise_or(mask_o, mask_c)
     kernel = np.ones((25,25), np.uint8)
     combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
@@ -118,8 +118,85 @@ def detect_particles_heuristically(img):
                 found_boxes.append(FakeBox([x, y, x+w, y+h]))
     return found_boxes
 
+# --- [v22] Advanced Visualization Helper ---
+def draw_high_quality_annotations(img_bgr, reports):
+    """
+    Draws anti-aliased boxes with OpenCV and High-Res Text with PIL (Arial).
+    """
+    h, w = img_bgr.shape[:2]
+    # Dynamic scale based on image size
+    scale_factor = min(w, h) / 1000.0
+    thickness = max(2, int(4 * scale_factor))
+    font_size = max(14, int(24 * scale_factor))
+    
+    # 1. Draw Boxes (OpenCV handles lines better)
+    for r in reports:
+        x1, y1, x2, y2 = r['box']
+        status = r['status']
+        if status == "CONTAMINATED": color = (0, 0, 255)   # Red
+        elif status == "RECHECK REQUIRED": color = (0, 165, 255) # Orange
+        else: color = (0, 255, 0) # Green (SAFE)
+        
+        cv2.rectangle(img_bgr, (x1, y1), (x2, y2), color, thickness, cv2.LINE_AA)
+
+    # 2. Draw Text (PIL for better fonts)
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(img_rgb)
+    draw = ImageDraw.Draw(pil_img)
+    
+    # Load Font (Try standard fonts available on Linux/Windows)
+    try:
+        font = ImageFont.truetype("arial.ttf", font_size)
+    except IOError:
+        try:
+            # Fallback for Linux servers (Debian/Ubuntu)
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+        except IOError:
+            font = ImageFont.load_default()
+
+    for r in reports:
+        x1, y1, _, _ = r['box']
+        status = r['status']
+        
+        if status == "CONTAMINATED": 
+            color = (255, 0, 0)
+            text_color = (255, 255, 255)
+        elif status == "RECHECK REQUIRED": 
+            color = (255, 165, 0)
+            text_color = (0, 0, 0)
+        else: 
+            color = (0, 255, 0)
+            text_color = (0, 0, 0)
+            
+        label = f"Area {r['id']+1}: {status[:4]}"
+        if status == "RECHECK REQUIRED": label = f"Area {r['id']+1}: RECHECK"
+
+        # Calculate text background size
+        try:
+            # Pillow >= 10.0
+            left, top, right, bottom = font.getbbox(label)
+            text_w = right - left
+            text_h = bottom - top
+        except AttributeError:
+            # Pillow < 10.0
+            text_w, text_h = draw.textsize(label, font=font)
+        
+        pad = int(5 * scale_factor)
+        
+        # Draw Label Background
+        draw.rectangle(
+            [x1, y1 - text_h - 2*pad, x1 + text_w + 2*pad, y1],
+            fill=color
+        )
+        # Draw Text
+        draw.text((x1 + pad, y1 - text_h - 1.5*pad), label, font=font, fill=text_color)
+
+    # Convert back to BGR for OpenCV consistency if needed, but we return RGB for Streamlit usually.
+    # However, process_frame usually returns BGR because it saves to disk with cv2.imwrite.
+    # So we convert back to BGR here.
+    return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
 def process_frame(img):
-    """Main processing pipeline (v10.2.1 Logic)."""
     img = apply_gamma_correction(img, gamma=0.8)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     img_h, img_w = img.shape[:2]
@@ -136,14 +213,13 @@ def process_frame(img):
         roi_hsv = hsv[max(0,y1):min(img_h,y2), max(0,x1):min(img_w,x2)]
         if roi_hsv.size == 0: continue
         # Verify signal presence
-        if np.sum(cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([60, 255, 255]))) + np.sum(cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))) > 200:
+        if np.sum(cv2.inRange(roi_hsv, np.array([0, 35, 35]), np.array([65, 255, 255]))) + np.sum(cv2.inRange(roi_hsv, np.array([75, 30, 30]), np.array([170, 255, 255]))) > 100:
             combined_boxes.append((box, "AI"))
 
     if not combined_boxes:
         for cv_box in detect_particles_heuristically(img): combined_boxes.append((cv_box, "CV_BACKUP"))
             
     reports = []
-    draw_img = img.copy()
 
     for i, (box, method) in enumerate(combined_boxes):
         coords = box.xyxy[0].cpu().numpy().flatten(); x1, y1, x2, y2 = map(int, coords)
@@ -153,8 +229,8 @@ def process_frame(img):
         
         valid_mask = (roi_hsv[:,:,1]>25) & (roi_hsv[:,:,2]>25)
         
-        mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([60, 255, 255]))
-        mask_cyan_candidate = cv2.inRange(roi_hsv, np.array([80, 30, 30]), np.array([165, 255, 255]))
+        mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([65, 255, 255]))
+        mask_cyan_candidate = cv2.inRange(roi_hsv, np.array([75, 30, 30]), np.array([170, 255, 255]))
         
         mask_particle_body = np.zeros_like(mask_orange)
         contours, _ = cv2.findContours(cv2.morphologyEx(mask_orange & (valid_mask.astype(np.uint8)*255), cv2.MORPH_CLOSE, np.ones((5,5), np.uint8)), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -167,21 +243,18 @@ def process_frame(img):
         box_area = (nx2-nx1)*(ny2-ny1)
         orange_area_pct = (p_count/box_area)*100 if box_area>0 else 0
 
-        # v10.2.1 Logic: Recheck condition
-        if p_count < 100 or orange_area_pct < 3.0:
-            status = "RECHECK REQUIRED"; cv_color = (0, 165, 255); phi = 0; cyan_area = 0
-            avg_int = 0
+        # v10.2.1 Logic
+        if p_count < 50 and method == "AI":
+            status = "RECHECK REQUIRED"; phi = 0; cyan_area = 0; avg_int = 0
         else:
-            mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3,3), np.uint8), iterations=1)
+            mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((5,5), np.uint8), iterations=3)
             if p_count < 50: mask_containment_zone = np.ones_like(mask_orange) * 255
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
             
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
             
-            # v10.2.1 Logic: Saturated Signal Detection
             is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
             is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
-            
             mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
             saturated_pixels = np.sum(mask_saturated_valid > 0)
 
@@ -190,23 +263,19 @@ def process_frame(img):
             
             cyan_area = (np.sum(mask_cyan>0)/p_count*100) if p_count>0 else 0
             avg_int = np.mean(intensity_map[mask_cyan>0]) if np.sum(mask_cyan>0)>0 else 0
-            
             phi = cyan_area * (avg_int / 10.0)
             
             status = "CONTAMINATED" if (phi > 5.0 or saturated_pixels > 20) else "SAFE"
             if status == "CONTAMINATED" and phi < 5.0: phi = 99.9
-            cv_color = (255, 255, 0) if status == "CONTAMINATED" else (0, 255, 0)
 
-        cv2.rectangle(draw_img, (nx1, ny1), (nx2, ny2), cv_color, 4)
-        label_text = f"Area {i+1}: {status[:4]}" if status != "RECHECK REQUIRED" else f"Area {i+1}: RECHECK"
-        
-        # [Font Update] Size: 5.0, Thickness: 5, Anti-Aliasing applied
-        cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 5.0, cv_color, 5, cv2.LINE_AA)
-        
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
-    return draw_img, reports
+    
+    # [v22] Apply High-Quality Visualization
+    final_draw_img = draw_high_quality_annotations(img.copy(), reports)
+    
+    return final_draw_img, reports
 
-# --- [4] UI: Admin Mode ---
+# --- UI (Admin Mode) ---
 def render_admin_page():
     st.markdown("<h2 class='header-text'>Research Data Management Center</h2>", unsafe_allow_html=True)
     
@@ -252,88 +321,65 @@ def render_admin_page():
         
         if os.path.exists(img_path):
             img_bgr = cv2.imread(img_path)
-            img_corrected = apply_gamma_correction(img_bgr, gamma=0.8)
-            img_rgb = cv2.cvtColor(img_corrected, cv2.COLOR_BGR2RGB)
-            draw_img = img_rgb.copy()
-            
+            # Use the same HQ drawing function
             particles = data.get('particles', data.get('reports', []))
+            draw_img = draw_high_quality_annotations(apply_gamma_correction(img_bgr, gamma=0.8), particles)
             
-            if particles:
-                for idx, p in enumerate(particles):
-                    if 'box' not in p: continue
-                    x1,y1,x2,y2 = p['box']
-                    status = p.get('status', 'SAFE')
-                    
-                    color = (0, 255, 0)
-                    if status == "CONTAMINATED": color = (255, 0, 0)
-                    elif status == "RECHECK REQUIRED": color = (255, 165, 0)
-                    
-                    cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
-                    label_text = f"Area {idx + 1}: {status[:4]}"
-                    if status == "RECHECK REQUIRED": label_text = f"Area {idx + 1}: RECHECK"
-                    
-                    # [Font Update] Size: 5.0, Thickness: 5, Anti-Aliasing
-                    cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 5.0, color, 5, cv2.LINE_AA)
+            # Convert BGR to RGB for Streamlit
+            img_rgb = cv2.cvtColor(draw_img, cv2.COLOR_BGR2RGB)
+            display_img = standardize_image_size(img_rgb, 800, 600)
+            
+            st.image(display_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
+
+            # [Manual Slider]
+            with st.expander("➕ Manual Region Injection", expanded=False):
+                st.info("Inject ROI if AI missed.")
+                h, w = img_bgr.shape[:2]
+                mc1, mc2 = st.columns(2)
+                with mc1:
+                    mx1 = st.slider("X Start", 0, w, int(w*0.3), key="mx1")
+                    mx2 = st.slider("X End", 0, w, int(w*0.7), key="mx2")
+                with mc2:
+                    my1 = st.slider("Y Start", 0, h, int(h*0.3), key="my1")
+                    my2 = st.slider("Y End", 0, h, int(h*0.7), key="my2")
                 
-                display_img = standardize_image_size(draw_img, 800, 600)
-                st.image(display_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
+                # Preview on original size (scaled)
+                preview = img_rgb.copy()
+                cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
+                st.image(standardize_image_size(preview, 800, 600), caption="Preview", width=800)
+                
+                if st.button("✅ Inject"):
+                    new_particle = {"id": len(particles), "box": [mx1, my1, mx2, my2], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True}
+                    particles.append(new_particle)
+                    data['particles'] = particles
+                    data['reports'] = particles
+                    with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                    st.success("Injected!"); st.rerun()
 
-                # [Manual Slider]
-                with st.expander("➕ Manual Region Injection", expanded=False):
-                    st.info("Inject ROI if AI missed.")
-                    h, w = img_rgb.shape[:2]
-                    mc1, mc2 = st.columns(2)
-                    with mc1:
-                        mx1 = st.slider("X Start", 0, w, int(w*0.3), key="mx1")
-                        mx2 = st.slider("X End", 0, w, int(w*0.7), key="mx2")
-                    with mc2:
-                        my1 = st.slider("Y Start", 0, h, int(h*0.3), key="my1")
-                        my2 = st.slider("Y End", 0, h, int(h*0.7), key="my2")
-                    
-                    preview = draw_img.copy()
-                    cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
-                    st.image(standardize_image_size(preview, 800, 600), caption="Preview", width=800)
-                    
-                    if st.button("✅ Inject"):
-                        new_particle = {"id": len(particles), "box": [mx1, my1, mx2, my2], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True}
-                        particles.append(new_particle)
-                        data['particles'] = particles
-                        data['reports'] = particles
-                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                        st.success("Injected!"); st.rerun()
-
-                with st.form("update"):
-                    st.markdown("#### Annotation Correction")
-                    new_parts = []
-                    cols = st.columns(2)
-                    for i, p in enumerate(particles):
-                        with cols[i%2]:
-                            stat = p.get('status','SAFE')
-                            cls = "status-cont" if stat=="CONTAMINATED" else "status-safe" if stat=="SAFE" else "status-warn"
-                            st.markdown(f"**Area {i+1}**: <span class='{cls}'>{stat}</span>", unsafe_allow_html=True)
-                            idx = ["SAFE","CONTAMINATED","RECHECK REQUIRED"].index(stat) if stat in ["SAFE","CONTAMINATED","RECHECK REQUIRED"] else 0
-                            new_stat = st.radio("Status", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
-                            p['status'] = new_stat
-                            p['id'] = i
-                            new_parts.append(p)
-                    if st.form_submit_button("Save Annotations"):
-                        data['particles'] = new_parts
-                        data['reports'] = new_parts
-                        data['reviewed'] = True
-                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                        st.success("Annotations Saved!"); st.rerun()
-            else:
-                st.image(standardize_image_size(img_rgb, 800, 600), caption="No particles", width=800)
-                st.warning("No particles found.")
-                if st.button("➕ Inject Center ROI"):
-                     h, w = img_rgb.shape[:2]
-                     new_p = {"id":0, "box":[int(w*0.3),int(h*0.3),int(w*0.7),int(h*0.7)], "status":"CONTAMINATED", "phi":0, "cyan":0, "orange":0, "manual":True}
-                     data['particles'] = [new_p]; data['reports'] = [new_p]
-                     with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                     st.rerun()
+            with st.form("update"):
+                st.markdown("#### Annotation Correction")
+                new_parts = []
+                cols = st.columns(2)
+                for i, p in enumerate(particles):
+                    with cols[i%2]:
+                        stat = p.get('status','SAFE')
+                        cls = "status-cont" if stat=="CONTAMINATED" else "status-safe" if stat=="SAFE" else "status-warn"
+                        st.markdown(f"**Area {i+1}**: <span class='{cls}'>{stat}</span>", unsafe_allow_html=True)
+                        idx = ["SAFE","CONTAMINATED","RECHECK REQUIRED"].index(stat) if stat in ["SAFE","CONTAMINATED","RECHECK REQUIRED"] else 0
+                        new_stat = st.radio("Status", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
+                        p['status'] = new_stat
+                        p['id'] = i
+                        new_parts.append(p)
+                if st.form_submit_button("Save Annotations"):
+                    data['particles'] = new_parts
+                    data['reports'] = new_parts
+                    data['reviewed'] = True
+                    with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                    st.success("Saved!"); st.rerun()
         else: st.error("Image file missing")
     except Exception as e: st.error(f"Error loading data: {e}")
 
+# --- Main ---
 if 'admin_mode' not in st.session_state: st.session_state['admin_mode'] = False
 st.sidebar.title("Navigation")
 mode = st.sidebar.radio("Go to", ["Real-time Inference", "Admin Console"])
@@ -358,6 +404,7 @@ elif mode == "Real-time Inference":
         if image is None: st.error("Load Failed")
         else:
             try:
+                # v22 drawing function
                 res_img, reports = process_frame(image)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 fn = f"TFCP_{ts}"
@@ -365,8 +412,11 @@ elif mode == "Real-time Inference":
                 with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
                     json.dump({"filename":f"{fn}.jpg", "timestamp":ts, "reports":reports, "reviewed":False}, f, indent=4)
                 
-                display_img = standardize_image_size(res_img, 800, 600)
-                with c1: st.image(cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB), caption="Analysis Result", width=800)
+                # Convert BGR (from process_frame) to RGB for Streamlit
+                res_rgb = cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB)
+                display_img = standardize_image_size(res_rgb, 800, 600)
+                
+                with c1: st.image(display_img, caption="Analysis Result", width=800)
                 with c2:
                     st.markdown("### Metrics")
                     if reports:
