@@ -198,46 +198,40 @@ def process_frame(img):
             cv_color = (255, 255, 0) if status == "CONTAMINATED" else (0, 255, 0)
 
         cv2.rectangle(draw_img, (nx1, ny1), (nx2, ny2), cv_color, 4)
-        
-        # [Large Font Labeling]
         label_text = f"Area {i+1}: {status[:4]}" if status != "RECHECK REQUIRED" else f"Area {i+1}: RECHECK"
-        cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, cv_color, 3)
+        
+        # [Font Update] Size: 3.0, Thickness: 3
+        cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 3.0, cv_color, 3)
         
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
     return draw_img, reports
 
-# --- UI (Admin Mode: Slider Version) ---
-if 'admin_mode' not in st.session_state: st.session_state['admin_mode'] = False
-st.sidebar.title("Navigation")
-mode = st.sidebar.radio("Go to", ["Real-time Inference", "Admin Console"])
+# --- [4] UI: Admin Mode ---
+def render_admin_page():
+    st.markdown("<h2 class='header-text'>Research Data Management Center</h2>", unsafe_allow_html=True)
+    
+    log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
+    if not log_files: st.info("No data available."); return
 
-if mode == "Admin Console":
-    if not st.session_state['admin_mode']:
-        pwd = st.sidebar.text_input("Access Key", type="password")
-        if pwd == "tfcp2026": st.session_state['admin_mode'] = True; st.rerun()
-    if st.session_state['admin_mode']:
-        st.title("🗂️ Data Management Center")
-        log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
-        if not log_files: st.info("No data available."); st.stop()
-        
-        if 'current_log_file' not in st.session_state: st.session_state.current_log_file = log_files[0]
-        if st.session_state.current_log_file not in log_files: st.session_state.current_log_file = log_files[0]
-        
-        current_idx = log_files.index(st.session_state.current_log_file)
-        c1, c2, c3 = st.columns([1,4,1])
-        with c1: 
-            if st.button("◀ PREV"):
-                st.session_state.current_log_file = log_files[max(0, current_idx - 1)]; st.rerun()
-        with c3:
-            if st.button("NEXT ▶"):
-                st.session_state.current_log_file = log_files[min(len(log_files)-1, current_idx + 1)]; st.rerun()
-        with c2:
-            def update_index(): st.session_state.current_log_file = st.session_state.log_selector
-            st.selectbox("Select Log", log_files, index=current_idx, key='log_selector', on_change=update_index, label_visibility="collapsed")
+    if 'current_log_file' not in st.session_state: st.session_state.current_log_file = log_files[0]
+    if st.session_state.current_log_file not in log_files: st.session_state.current_log_file = log_files[0]
+    
+    current_idx = log_files.index(st.session_state.current_log_file)
+    
+    c1, c2, c3 = st.columns([1, 4, 1])
+    with c1: 
+        if st.button("◀ PREV"):
+            st.session_state.current_log_file = log_files[max(0, current_idx - 1)]; st.rerun()
+    with c3:
+        if st.button("NEXT ▶"):
+            st.session_state.current_log_file = log_files[min(len(log_files)-1, current_idx + 1)]; st.rerun()
+    with c2:
+        def update_index(): st.session_state.current_log_file = st.session_state.log_selector
+        st.selectbox("Select Log", log_files, index=current_idx, key='log_selector', on_change=update_index, label_visibility="collapsed")
         
         bc1, bc2 = st.columns(2)
         with bc1:
-            if st.button("📦 Backup (ZIP)", use_container_width=True):
+            if st.button("📦 Archive (ZIP)", use_container_width=True):
                 shutil.make_archive("TFCP_Dataset", 'zip', SAVE_ROOT)
                 with open("TFCP_Dataset.zip", "rb") as fp: st.download_button("Download ZIP", fp, "TFCP_Dataset.zip", "application/zip")
         with bc2:
@@ -247,96 +241,108 @@ if mode == "Admin Console":
                     with open(log_path_del, 'r') as f: del_data = json.load(f)
                     if os.path.exists(log_path_del): os.remove(log_path_del)
                     if os.path.exists(os.path.join(IMG_DIR, del_data['filename'])): os.remove(os.path.join(IMG_DIR, del_data['filename']))
-                    st.success("Deleted"); del st.session_state.current_log_file; st.rerun()
+                    st.success("Deleted."); del st.session_state.current_log_file; st.rerun()
                 except: st.error("Delete failed")
 
-        log_path = os.path.join(LOG_DIR, st.session_state.current_log_file)
-        try:
-            with open(log_path, 'r') as f: data = json.load(f)
-            img_path = os.path.join(IMG_DIR, data['filename'])
-            if os.path.exists(img_path):
-                img_bgr = cv2.imread(img_path)
-                img_corrected = apply_gamma_correction(img_bgr, gamma=0.8)
-                img_rgb = cv2.cvtColor(img_corrected, cv2.COLOR_BGR2RGB)
-                draw_img = img_rgb.copy()
-                
-                particles = data.get('particles', data.get('reports', []))
-                
-                if particles:
-                    for idx, p in enumerate(particles):
-                        if 'box' not in p: continue
-                        x1,y1,x2,y2 = p['box']
-                        status = p.get('status', 'SAFE')
-                        
-                        color = (0, 255, 0)
-                        if status == "CONTAMINATED": color = (255, 0, 0)
-                        elif status == "RECHECK REQUIRED": color = (255, 165, 0)
-                        
-                        cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
-                        label_text = f"Area {idx + 1}: {status[:4]}"
-                        if status == "RECHECK REQUIRED": label_text = f"Area {idx + 1}: RECHECK"
-                        
-                        # [Visual] Large Font for Admin
-                        cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+    log_path = os.path.join(LOG_DIR, st.session_state.current_log_file)
+    try:
+        with open(log_path, 'r') as f: data = json.load(f)
+        img_path = os.path.join(IMG_DIR, data['filename'])
+        
+        if os.path.exists(img_path):
+            img_bgr = cv2.imread(img_path)
+            img_corrected = apply_gamma_correction(img_bgr, gamma=0.8)
+            img_rgb = cv2.cvtColor(img_corrected, cv2.COLOR_BGR2RGB)
+            draw_img = img_rgb.copy()
+            
+            particles = data.get('particles', data.get('reports', []))
+            
+            if particles:
+                for idx, p in enumerate(particles):
+                    if 'box' not in p: continue
+                    x1,y1,x2,y2 = p['box']
+                    status = p.get('status', 'SAFE')
                     
-                    display_img = standardize_image_size(draw_img, 800, 600)
-                    st.image(display_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
+                    color = (0, 255, 0)
+                    if status == "CONTAMINATED": color = (255, 0, 0)
+                    elif status == "RECHECK REQUIRED": color = (255, 165, 0)
+                    
+                    cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 4)
+                    label_text = f"Area {idx + 1}: {status[:4]}"
+                    if status == "RECHECK REQUIRED": label_text = f"Area {idx + 1}: RECHECK"
+                    
+                    # [Font Update] Size: 3.0, Thickness: 3
+                    cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 3.0, color, 3)
+                
+                display_img = standardize_image_size(draw_img, 800, 600)
+                st.image(display_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
 
-                    # [Manual Slider]
-                    with st.expander("➕ Manual Region Injection", expanded=False):
-                        st.info("Inject ROI if AI missed.")
-                        h, w = img_rgb.shape[:2]
-                        mc1, mc2 = st.columns(2)
-                        with mc1:
-                            mx1 = st.slider("X Start", 0, w, int(w*0.3), key="mx1")
-                            mx2 = st.slider("X End", 0, w, int(w*0.7), key="mx2")
-                        with mc2:
-                            my1 = st.slider("Y Start", 0, h, int(h*0.3), key="my1")
-                            my2 = st.slider("Y End", 0, h, int(h*0.7), key="my2")
-                        
-                        preview = draw_img.copy()
-                        cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
-                        st.image(standardize_image_size(preview, 800, 600), caption="Preview", width=800)
-                        
-                        if st.button("✅ Inject"):
-                            new_particle = {"id": len(particles), "box": [mx1, my1, mx2, my2], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True}
-                            particles.append(new_particle)
-                            data['particles'] = particles
-                            data['reports'] = particles
-                            with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                            st.success("Injected!"); st.rerun()
+                # [Manual Slider]
+                with st.expander("➕ Manual Region Injection", expanded=False):
+                    st.info("Inject ROI if AI missed.")
+                    h, w = img_rgb.shape[:2]
+                    mc1, mc2 = st.columns(2)
+                    with mc1:
+                        mx1 = st.slider("X Start", 0, w, int(w*0.3), key="mx1")
+                        mx2 = st.slider("X End", 0, w, int(w*0.7), key="mx2")
+                    with mc2:
+                        my1 = st.slider("Y Start", 0, h, int(h*0.3), key="my1")
+                        my2 = st.slider("Y End", 0, h, int(h*0.7), key="my2")
+                    
+                    preview = draw_img.copy()
+                    cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
+                    st.image(standardize_image_size(preview, 800, 600), caption="Preview", width=800)
+                    
+                    if st.button("✅ Inject"):
+                        new_particle = {"id": len(particles), "box": [mx1, my1, mx2, my2], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True}
+                        particles.append(new_particle)
+                        data['particles'] = particles
+                        data['reports'] = particles
+                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                        st.success("Injected!"); st.rerun()
 
-                    with st.form("update"):
-                        st.markdown("#### Annotation Correction")
-                        new_parts = []
-                        cols = st.columns(2)
-                        for i, p in enumerate(particles):
-                            with cols[i%2]:
-                                stat = p.get('status','SAFE')
-                                cls = "status-cont" if stat=="CONTAMINATED" else "status-safe" if stat=="SAFE" else "status-warn"
-                                st.markdown(f"**Area {i+1}**: <span class='{cls}'>{stat}</span>", unsafe_allow_html=True)
-                                idx = ["SAFE","CONTAMINATED","RECHECK REQUIRED"].index(stat) if stat in ["SAFE","CONTAMINATED","RECHECK REQUIRED"] else 0
-                                new_stat = st.radio("Status", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
-                                p['status'] = new_stat
-                                p['id'] = i
-                                new_parts.append(p)
-                        if st.form_submit_button("Save Annotations"):
-                            data['particles'] = new_parts
-                            data['reports'] = new_parts
-                            data['reviewed'] = True
-                            with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                            st.success("Saved!"); st.rerun()
-                else:
-                    st.image(standardize_image_size(img_rgb, 800, 600), caption="No particles", width=800)
-                    st.warning("No particles found.")
-                    if st.button("➕ Inject Center ROI"):
-                         h, w = img_rgb.shape[:2]
-                         new_p = {"id":0, "box":[int(w*0.3),int(h*0.3),int(w*0.7),int(h*0.7)], "status":"CONTAMINATED", "phi":0, "cyan":0, "orange":0, "manual":True}
-                         data['particles'] = [new_p]; data['reports'] = [new_p]
-                         with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                         st.rerun()
-            else: st.error("Image missing")
-        except Exception as e: st.error(f"Error: {e}")
+                with st.form("update"):
+                    st.markdown("#### Annotation Correction")
+                    new_parts = []
+                    cols = st.columns(2)
+                    for i, p in enumerate(particles):
+                        with cols[i%2]:
+                            stat = p.get('status','SAFE')
+                            cls = "status-cont" if stat=="CONTAMINATED" else "status-safe" if stat=="SAFE" else "status-warn"
+                            st.markdown(f"**Area {i+1}**: <span class='{cls}'>{stat}</span>", unsafe_allow_html=True)
+                            idx = ["SAFE","CONTAMINATED","RECHECK REQUIRED"].index(stat) if stat in ["SAFE","CONTAMINATED","RECHECK REQUIRED"] else 0
+                            new_stat = st.radio("Status", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
+                            p['status'] = new_stat
+                            p['id'] = i
+                            new_parts.append(p)
+                    if st.form_submit_button("Save Annotations"):
+                        data['particles'] = new_parts
+                        data['reports'] = new_parts
+                        data['reviewed'] = True
+                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                        st.success("Saved!"); st.rerun()
+            else:
+                st.image(standardize_image_size(img_rgb, 800, 600), caption="No particles", width=800)
+                st.warning("No particles found.")
+                if st.button("➕ Inject Center ROI"):
+                     h, w = img_rgb.shape[:2]
+                     new_p = {"id":0, "box":[int(w*0.3),int(h*0.3),int(w*0.7),int(h*0.7)], "status":"CONTAMINATED", "phi":0, "cyan":0, "orange":0, "manual":True}
+                     data['particles'] = [new_p]; data['reports'] = [new_p]
+                     with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                     st.rerun()
+        else: st.error("Image file missing")
+    except Exception as e: st.error(f"Error loading data: {e}")
+
+if 'admin_mode' not in st.session_state: st.session_state['admin_mode'] = False
+st.sidebar.title("Navigation")
+mode = st.sidebar.radio("Go to", ["Real-time Inference", "Admin Console"])
+
+if mode == "Admin Console":
+    if not st.session_state['admin_mode']:
+        pwd = st.sidebar.text_input("Access Key", type="password")
+        if pwd == "tfcp2026": st.session_state['admin_mode'] = True; st.rerun()
+        elif pwd: st.error("Invalid Key")
+    if st.session_state['admin_mode']: render_admin_page()
 
 elif mode == "Real-time Inference":
     st.markdown("<h1 class='header-text'>TFCP Inference Engine</h1>", unsafe_allow_html=True)
@@ -375,4 +381,4 @@ elif mode == "Real-time Inference":
                             </div>
                             """, unsafe_allow_html=True)
                     else: st.warning("No particles")
-            except Exception as e: st.error(f"Error: {e}")
+            except Exception as e: st.error(f"Analysis Error: {e}")
