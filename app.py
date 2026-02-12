@@ -10,7 +10,7 @@ from datetime import datetime
 import pandas as pd
 import requests
 
-# --- [1] Page Config & Professional CSS ---
+# --- [1] Page Config & CSS ---
 st.set_page_config(page_title="TFCP Quantitative Analysis System", page_icon="🔬", layout="wide")
 
 st.markdown("""
@@ -44,18 +44,40 @@ def load_model():
 
 model = load_model()
 
-# --- [3] Visualization Helper (High-Res Font) ---
+# --- [3] Visualization Helper (Robust Font Loading) ---
 @st.cache_resource
 def get_custom_font(size=20):
+    """
+    Loads a scalable TrueType font.
+    Tries to download Roboto, falls back to system fonts if download fails.
+    """
     font_path = "Roboto-Bold.ttf"
-    font_url = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
+    # 1. Try Downloading Roboto-Bold
     if not os.path.exists(font_path):
         try:
-            r = requests.get(font_url)
-            with open(font_path, "wb") as f: f.write(r.content)
+            url = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
+            r = requests.get(url, timeout=3)
+            if r.status_code == 200:
+                with open(font_path, "wb") as f: f.write(r.content)
         except: pass
-    try: return ImageFont.truetype(font_path, size)
-    except: return ImageFont.load_default()
+
+    # 2. Try loading the downloaded font
+    if os.path.exists(font_path):
+        try: return ImageFont.truetype(font_path, size)
+        except: pass
+    
+    # 3. Fallback: Linux System Fonts (Common in Streamlit Cloud)
+    system_fonts = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+    ]
+    for sys_font in system_fonts:
+        if os.path.exists(sys_font):
+            try: return ImageFont.truetype(sys_font, size)
+            except: continue
+            
+    # 4. Last Resort: Default Bitmap Font (Might be small)
+    return ImageFont.load_default()
 
 def draw_smart_annotations(img_bgr, reports):
     """
@@ -70,7 +92,7 @@ def draw_smart_annotations(img_bgr, reports):
     # Scale for text visibility
     scale = max(w, h) / 1000.0
     line_width = max(4, int(6 * scale)) # Thicker box
-    font_size = max(20, int(35 * scale)) # Larger font
+    font_size = max(20, int(35 * scale)) # Ensure font is large enough
     font = get_custom_font(font_size)
     
     for r in reports:
@@ -96,6 +118,7 @@ def draw_smart_annotations(img_bgr, reports):
             bbox = font.getbbox(label_txt)
             text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
         except:
+            # Fallback for older Pillow versions
             text_w, text_h = draw.textsize(label_txt, font=font)
             
         pad = int(10 * scale)
@@ -145,10 +168,13 @@ def filter_nested_boxes(boxes):
         keep = True
         for j in keep_indices:
             box_b = boxes[j].xyxy[0].cpu().numpy().flatten()
-            if calculate_iou(box_a, box_b) > 0.3: keep = False; break
+            if calculate_iou(box_a, box_b) > 0.3:
+                keep = False; break
             ix1, iy1 = max(box_a[0], box_b[0]), max(box_a[1], box_b[1])
             ix2, iy2 = min(box_a[2], box_b[2]), min(box_a[3], box_b[3])
-            if (max(0, ix2-ix1)*max(0, iy2-iy1)) / ((box_a[2]-box_a[0])*(box_a[3]-box_a[1])) > 0.7: keep = False; break
+            inter_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+            area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+            if inter_area / area_a > 0.7: keep = False; break
         if keep: keep_indices.append(i)
     return [boxes[idx] for idx in keep_indices]
 
@@ -217,17 +243,17 @@ def process_frame(img):
         box_area = (nx2-nx1)*(ny2-ny1)
         orange_area_pct = (p_count/box_area)*100 if box_area>0 else 0
 
-        # v10.2.1 Logic Check
         if p_count < 100 or orange_area_pct < 3.0:
             status = "RECHECK REQUIRED"; phi = 0; cyan_area = 0; avg_int = 0
         else:
             mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3,3), np.uint8), iterations=1)
+            if p_count < 50: mask_containment_zone = np.ones_like(mask_orange) * 255
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
-            b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
             
-            # v10.2.1 Saturated Logic
+            b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
             is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
             is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
+            
             mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
             saturated_pixels = np.sum(mask_saturated_valid > 0)
 
@@ -241,13 +267,13 @@ def process_frame(img):
 
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
     
-    # Use PIL Drawing (v26 Style)
+    # Use PIL Drawing (High Quality)
     final_img = draw_smart_annotations(img.copy(), reports)
     return final_img, reports
 
 # --- UI (Admin) ---
 def render_admin_page():
-    st.markdown("<h2 class='header-text'>Research Data Management</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 class='header-text'>Research Data Management Center</h2>", unsafe_allow_html=True)
     
     log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
     if not log_files: st.info("No data available."); return
@@ -273,7 +299,7 @@ def render_admin_page():
                 shutil.make_archive("TFCP_Dataset", 'zip', SAVE_ROOT)
                 with open("TFCP_Dataset.zip", "rb") as fp: st.download_button("Download ZIP", fp, "TFCP_Dataset.zip", "application/zip")
         with bc2:
-            if st.button("🗑️ Delete", type="primary", use_container_width=True):
+            if st.button("🗑️ Delete", type="primary"):
                 try:
                     f_path = os.path.join(LOG_DIR, st.session_state.current_log_file)
                     with open(f_path,'r') as f: d = json.load(f)
@@ -372,6 +398,7 @@ elif mode == "Real-time Inference":
         if image is None: st.error("Load Failed")
         else:
             try:
+                # Use High-Res drawing
                 res_img_rgb, reports = process_frame(image)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 fn = f"TFCP_{ts}"
