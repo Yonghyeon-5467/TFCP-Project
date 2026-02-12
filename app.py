@@ -2,33 +2,16 @@ import streamlit as st
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 import os
 import json
 import shutil
 from datetime import datetime
 import pandas as pd
-import requests
 
-# --- [1] Page Config & Professional CSS ---
-st.set_page_config(page_title="TFCP Quantitative Analysis System", page_icon="🔬", layout="wide")
+# --- [1] 페이지 및 기본 설정 ---
+st.set_page_config(page_title="TFCP Data Manager", page_icon="🧪", layout="wide")
 
-st.markdown("""
-    <style>
-        .main { background-color: #f8f9fa; }
-        .stButton>button { width: 100%; border-radius: 6px; font-weight: 600; font-family: 'Helvetica', sans-serif; }
-        .metric-card {
-            background-color: white; border: 1px solid #e1e4e8; border-radius: 10px;
-            padding: 20px; margin-bottom: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.05);
-        }
-        .status-safe { color: #28a745; font-weight: 800; }
-        .status-cont { color: #dc3545; font-weight: 800; }
-        .status-recheck { color: #fd7e14; font-weight: 800; }
-        .header-text { font-family: 'Helvetica Neue', sans-serif; font-weight: 700; color: #1f2937; }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- [2] Storage & Model Setup ---
 SAVE_ROOT = "TFCP_Data"
 IMG_DIR = os.path.join(SAVE_ROOT, "raw_images")
 LOG_DIR = os.path.join(SAVE_ROOT, "analysis_logs")
@@ -36,6 +19,7 @@ LOG_DIR = os.path.join(SAVE_ROOT, "analysis_logs")
 if not os.path.exists(IMG_DIR): os.makedirs(IMG_DIR)
 if not os.path.exists(LOG_DIR): os.makedirs(LOG_DIR)
 
+# --- [2] 모델 로드 ---
 @st.cache_resource
 def load_model():
     if os.path.exists('best.pt'):
@@ -44,88 +28,7 @@ def load_model():
 
 model = load_model()
 
-# --- [3] Advanced Visualization Helper (Pretty Fonts) ---
-@st.cache_resource
-def get_custom_font(size=20):
-    """Downloads and loads a clean sans-serif font."""
-    font_path = "Roboto-Bold.ttf"
-    font_url = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
-    
-    if not os.path.exists(font_path):
-        try:
-            r = requests.get(font_url)
-            with open(font_path, "wb") as f:
-                f.write(r.content)
-        except:
-            pass # Network fail, fallback later
-
-    try:
-        return ImageFont.truetype(font_path, size)
-    except:
-        return ImageFont.load_default()
-
-def draw_smart_annotations(img_bgr, reports):
-    """
-    Combines OpenCV for boxes (clean lines) and PIL for text (pretty fonts).
-    """
-    h, w = img_bgr.shape[:2]
-    # Dynamic scaling
-    scale = max(w, h) / 1000.0
-    line_width = max(2, int(4 * scale))
-    font_size = max(14, int(24 * scale))
-    
-    # 1. Draw Boxes with OpenCV (Better for rectangles)
-    for r in reports:
-        x1, y1, x2, y2 = r['box']
-        status = r['status']
-        
-        if status == "CONTAMINATED": color = (0, 0, 255) # Red (BGR)
-        elif status == "RECHECK REQUIRED": color = (0, 165, 255) # Orange (BGR)
-        else: color = (0, 255, 0) # Green (BGR)
-        
-        cv2.rectangle(img_bgr, (x1, y1), (x2, y2), color, line_width, cv2.LINE_AA)
-
-    # 2. Draw Text with PIL (Better for typography)
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(img_rgb).convert("RGBA")
-    draw = ImageDraw.Draw(pil_img)
-    font = get_custom_font(font_size)
-    
-    for r in reports:
-        x1, y1, _, _ = r['box']
-        status = r['status']
-        p_id = r['id']
-        
-        if status == "CONTAMINATED": 
-            bg_color = (220, 53, 69, 200) # Red with alpha
-        elif status == "RECHECK REQUIRED":
-            bg_color = (253, 126, 20, 200) # Orange with alpha
-        else:
-            bg_color = (40, 167, 69, 200) # Green with alpha
-            
-        label_txt = f"Area {p_id + 1}"
-        if status == "RECHECK REQUIRED": label_txt = "RECHECK"
-        elif status == "CONTAMINATED": label_txt += ": CONT"
-        else: label_txt += ": SAFE"
-        
-        # Calculate text size
-        try:
-            bbox = font.getbbox(label_txt)
-            text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        except:
-            text_w, text_h = draw.textsize(label_txt, font=font)
-            
-        pad = int(6 * scale)
-        lbl_y1 = y1 - text_h - 2*pad
-        if lbl_y1 < 0: lbl_y1 = y1
-        
-        # Draw Label Background & Text
-        draw.rectangle([x1, lbl_y1, x1 + text_w + 2*pad, lbl_y1 + text_h + 2*pad], fill=bg_color)
-        draw.text((x1 + pad, lbl_y1 + pad), label_txt, font=font, fill=(255, 255, 255, 255))
-        
-    return np.array(pil_img.convert("RGB"))
-
-# --- [4] Core Analysis Engine (v10.2.1 Logic) ---
+# --- [3] 핵심 분석 엔진 (v10.2.1 Logic) ---
 
 def apply_gamma_correction(image, gamma=0.8):
     invGamma = 1.0 / gamma
@@ -136,10 +39,14 @@ def standardize_image_size(img, target_width=800, target_height=600):
     h, w = img.shape[:2]
     scale = min(target_width/w, target_height/h)
     nw, nh = int(w*scale), int(h*scale)
-    resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
-    new_img = np.zeros((target_height, target_width, 3), dtype=np.uint8)
-    top, left = (target_height - nh) // 2, (target_width - nw) // 2
-    new_img[top:top+nh, left:left+nw] = resized
+    resized = cv2.resize(img, (nw, nh))
+    
+    delta_w = target_width - nw
+    delta_h = target_height - nh
+    top, bottom = delta_h//2, delta_h-(delta_h//2)
+    left, right = delta_w//2, delta_w-(delta_w//2)
+    
+    new_img = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=[0, 0, 0])
     return new_img
 
 def calculate_iou(box1, box2):
@@ -194,12 +101,12 @@ def detect_particles_heuristically(img):
     return found_boxes
 
 def process_frame(img):
-    img_corr = apply_gamma_correction(img, gamma=0.8)
-    hsv = cv2.cvtColor(img_corr, cv2.COLOR_BGR2HSV)
+    img = apply_gamma_correction(img, gamma=0.8)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     img_h, img_w = img.shape[:2]
 
     if model:
-        results = model.predict(source=img_corr, conf=0.10, iou=0.45, verbose=False)
+        results = model.predict(source=img, conf=0.10, iou=0.45, verbose=False)
         ai_raw_boxes = filter_nested_boxes(results[0].boxes)
     else: ai_raw_boxes = []
 
@@ -213,14 +120,15 @@ def process_frame(img):
             combined_boxes.append((box, "AI"))
 
     if not combined_boxes:
-        for cv_box in detect_particles_heuristically(img_corr): combined_boxes.append((cv_box, "CV_BACKUP"))
+        for cv_box in detect_particles_heuristically(img): combined_boxes.append((cv_box, "CV_BACKUP"))
             
     reports = []
-    
+    draw_img = img.copy()
+
     for i, (box, method) in enumerate(combined_boxes):
         coords = box.xyxy[0].cpu().numpy().flatten(); x1, y1, x2, y2 = map(int, coords)
         pad = int((x2-x1)*0.15); nx1=max(0,x1-pad); ny1=max(0,y1-pad); nx2=min(img_w,x2+pad); ny2=min(img_h,y2+pad)
-        roi_hsv = hsv[ny1:ny2, nx1:nx2]; roi_img = img_corr[ny1:ny2, nx1:nx2]
+        roi_hsv = hsv[ny1:ny2, nx1:nx2]; roi_img = img[ny1:ny2, nx1:nx2]
         if roi_hsv.size == 0: continue
         
         valid_mask = (roi_hsv[:,:,1]>25) & (roi_hsv[:,:,2]>25)
@@ -238,38 +146,31 @@ def process_frame(img):
         orange_area_pct = (p_count/box_area)*100 if box_area>0 else 0
 
         if p_count < 100 or orange_area_pct < 3.0:
-            status = "RECHECK REQUIRED"; phi = 0; cyan_area = 0; avg_int = 0
+            status = "RECHECK REQUIRED"; cv_color = (0, 165, 255); phi = 0; cyan_area = 0; avg_int = 0
         else:
             mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3,3), np.uint8), iterations=1)
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
-            
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
-            is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
-            is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
-            mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
-            saturated_pixels = np.sum(mask_saturated_valid > 0)
-
-            intensity_raw = np.where(is_glare, 0, np.where(is_saturated_cyan, ((g_ch + b_ch)/2.0 - r_ch*0.8), ((g_ch + b_ch)/2.0 - r_ch*1.7)))
-            intensity_map = np.clip(intensity_raw, 0, 100)
-            
+            intensity_raw = np.where((g_ch>200)&(b_ch>200)&(r_ch>200), 0, np.where((g_ch>200)&(b_ch>200)&(r_ch<200), ((g_ch+b_ch)/2.0-r_ch*0.8), ((g_ch+b_ch)/2.0-r_ch*1.7)))
             cyan_area = (np.sum(mask_cyan>0)/p_count*100) if p_count>0 else 0
-            avg_int = np.mean(intensity_map[mask_cyan>0]) if np.sum(mask_cyan>0)>0 else 0
+            avg_int = np.mean(np.clip(intensity_raw,0,100)[mask_cyan>0]) if np.sum(mask_cyan>0)>0 else 0
             phi = cyan_area * (avg_int / 10.0)
-            
-            status = "CONTAMINATED" if (phi > 5.0 or saturated_pixels > 20) else "SAFE"
+            status = "CONTAMINATED" if (phi > 5.0 or np.sum((mask_cyan>0) & ((g_ch>200)&(b_ch>200)&(r_ch<200)).astype(np.uint8))>0) else "SAFE"
             if status == "CONTAMINATED" and phi < 5.0: phi = 99.9
+            cv_color = (255, 255, 0) if status == "CONTAMINATED" else (0, 255, 0)
 
+        # [수정] 박스 및 텍스트 크기 확대
+        cv2.rectangle(draw_img, (nx1, ny1), (nx2, ny2), cv_color, 5) # 두께 5
+        label_text = f"Area {i+1}: {status[:4]}" if status != "RECHECK REQUIRED" else f"Area {i+1}: RECHECK"
+        # 폰트 2.0, 두께 4, 안티앨리어싱(LINE_AA) 적용
+        cv2.putText(draw_img, label_text, (nx1, ny1-10), cv2.FONT_HERSHEY_SIMPLEX, 2.0, cv_color, 4, cv2.LINE_AA)
+        
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
-    
-    # [Advanced Drawing]
-    final_img_rgb = draw_smart_annotations(img.copy(), reports)
-    # Convert RGB back to BGR if needed by other logic, but Streamlit wants RGB. 
-    # Standardize expects standard numpy array (H,W,C).
-    return final_img_rgb, reports
+    return draw_img, reports
 
-# --- [5] UI Logic ---
+# --- UI ---
 def render_admin_page():
-    st.markdown("<h2 class='header-text'>Research Data Management Center</h2>", unsafe_allow_html=True)
+    st.title("🗂️ 연구 데이터 관리 센터")
     
     log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
     if not log_files: st.info("No data available."); return
@@ -288,15 +189,15 @@ def render_admin_page():
             st.session_state.current_log_file = log_files[min(len(log_files)-1, current_idx + 1)]; st.rerun()
     with c2:
         def update_index(): st.session_state.current_log_file = st.session_state.log_selector
-        st.selectbox("Select Log", log_files, index=current_idx, key='log_selector', on_change=update_index, label_visibility="collapsed")
+        st.selectbox("파일 선택", log_files, index=current_idx, key='log_selector', on_change=update_index, label_visibility="collapsed")
         
         bc1, bc2 = st.columns(2)
         with bc1:
-            if st.button("📦 Archive (ZIP)", use_container_width=True):
-                shutil.make_archive("TFCP_Dataset", 'zip', SAVE_ROOT)
-                with open("TFCP_Dataset.zip", "rb") as fp: st.download_button("Download ZIP", fp, "TFCP_Dataset.zip", "application/zip")
+            if st.button("📦 ZIP 백업", use_container_width=True):
+                shutil.make_archive("TFCP_Backup", 'zip', SAVE_ROOT)
+                with open("TFCP_Backup.zip", "rb") as fp: st.download_button("📥 다운로드", fp, "TFCP_Backup.zip", "application/zip")
         with bc2:
-            if st.button("🗑️ Delete", type="primary"):
+            if st.button("🗑️ 삭제", type="primary"):
                 try:
                     f_path = os.path.join(LOG_DIR, st.session_state.current_log_file)
                     with open(f_path,'r') as f: d = json.load(f)
@@ -315,61 +216,84 @@ def render_admin_page():
             img_bgr = cv2.imread(img_path)
             if img_bgr is not None:
                 img_corrected = apply_gamma_correction(img_bgr, gamma=0.8)
+                img_rgb = cv2.cvtColor(img_corrected, cv2.COLOR_BGR2RGB)
+                draw_img = img_rgb.copy()
+                
                 particles = data.get('particles', data.get('reports', []))
                 
-                # Draw with PIL (returns RGB)
-                draw_img_rgb = draw_smart_annotations(img_corrected.copy(), particles)
-                display_img = standardize_image_size(draw_img_rgb, 800, 600)
-                
-                st.image(display_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
-
-                with st.expander("➕ Manual Region Injection", expanded=False):
-                    st.info("Inject ROI if AI missed.")
-                    h, w = img_corrected.shape[:2]
-                    mc1, mc2 = st.columns(2)
-                    with mc1:
-                        mx1 = st.slider("X Start", 0, w, int(w*0.3), key="mx1")
-                        mx2 = st.slider("X End", 0, w, int(w*0.7), key="mx2")
-                    with mc2:
-                        my1 = st.slider("Y Start", 0, h, int(h*0.3), key="my1")
-                        my2 = st.slider("Y End", 0, h, int(h*0.7), key="my2")
+                if particles:
+                    for idx, p in enumerate(particles):
+                        if 'box' not in p: continue
+                        x1,y1,x2,y2 = p['box']
+                        status = p.get('status', 'SAFE')
+                        
+                        color = (0, 255, 0)
+                        if status == "CONTAMINATED": color = (255, 0, 0)
+                        elif status == "RECHECK REQUIRED": color = (255, 165, 0)
+                        
+                        cv2.rectangle(draw_img, (x1, y1), (x2, y2), color, 5) # 두께 5
+                        label_text = f"Area {idx + 1}: {status[:4]}"
+                        if status == "RECHECK REQUIRED": label_text = f"Area {idx + 1}: RECHECK"
+                        
+                        # [수정] 관리자 모드 폰트 확대 (2.5배)
+                        cv2.putText(draw_img, label_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 2.5, color, 5, cv2.LINE_AA)
                     
-                    # Preview needs drawing manually for slider
-                    preview = img_corrected.copy()
-                    cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
-                    preview_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
-                    st.image(standardize_image_size(preview_rgb, 800, 600), caption="Preview", width=800)
-                    
-                    if st.button("✅ Inject"):
-                        new_particle = {"id": len(particles), "box": [mx1, my1, mx2, my2], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True}
-                        particles.append(new_particle)
-                        data['particles'] = particles
-                        data['reports'] = particles
-                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                        st.success("Injected!"); st.rerun()
+                    display_img = standardize_image_size(draw_img, 800, 600)
+                    st.image(display_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
 
-                with st.form("update"):
-                    st.markdown("#### Annotation Correction")
-                    new_parts = []
-                    cols = st.columns(2)
-                    for i, p in enumerate(particles):
-                        with cols[i%2]:
-                            stat = p.get('status','SAFE')
-                            cls = "status-cont" if stat=="CONTAMINATED" else "status-safe" if stat=="SAFE" else "status-warn"
-                            st.markdown(f"**Area {i+1}**: <span class='{cls}'>{stat}</span>", unsafe_allow_html=True)
-                            idx = ["SAFE","CONTAMINATED","RECHECK REQUIRED"].index(stat) if stat in ["SAFE","CONTAMINATED","RECHECK REQUIRED"] else 0
-                            new_stat = st.radio("Status", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
-                            p['status'] = new_stat
-                            p['id'] = i
-                            new_parts.append(p)
-                    if st.form_submit_button("Save Annotations"):
-                        data['particles'] = new_parts
-                        data['reports'] = new_parts
-                        data['reviewed'] = True
-                        with open(log_path, 'w') as f: json.dump(data, f, indent=4)
-                        st.success("Saved!"); st.rerun()
-        else: st.error("Image missing")
-    except Exception as e: st.error(f"Error: {e}")
+                    with st.expander("➕ 수동 영역 지정 (Manual Selection)", expanded=False):
+                        st.info("AI가 놓친 입자를 수동으로 추가합니다.")
+                        h, w = img_rgb.shape[:2]
+                        mc1, mc2 = st.columns(2)
+                        with mc1:
+                            mx1 = st.slider("X Start", 0, w, int(w*0.3), key="mx1")
+                            mx2 = st.slider("X End", 0, w, int(w*0.7), key="mx2")
+                        with mc2:
+                            my1 = st.slider("Y Start", 0, h, int(h*0.3), key="my1")
+                            my2 = st.slider("Y End", 0, h, int(h*0.7), key="my2")
+                        
+                        preview = draw_img.copy()
+                        cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
+                        st.image(standardize_image_size(preview, 800, 600), caption="Preview", width=800)
+                        
+                        if st.button("✅ 추가하기"):
+                            new_particle = {"id": len(particles), "box": [mx1, my1, mx2, my2], "status": "CONTAMINATED", "phi": 0, "cyan": 0, "orange": 0, "manual": True}
+                            particles.append(new_particle)
+                            data['particles'] = particles
+                            data['reports'] = particles
+                            with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                            st.success("추가됨!")
+                            st.rerun()
+
+                    with st.form("update"):
+                        new_parts = []
+                        cols = st.columns(2)
+                        for i, p in enumerate(particles):
+                            with cols[i%2]:
+                                stat = p.get('status','SAFE')
+                                st.write(f"**Area {i+1}**: {stat}")
+                                idx = ["SAFE","CONTAMINATED","RECHECK REQUIRED"].index(stat) if stat in ["SAFE","CONTAMINATED","RECHECK REQUIRED"] else 0
+                                new_stat = st.radio("Status", ["SAFE","CONTAMINATED","RECHECK REQUIRED"], index=idx, key=f"rad_{i}", horizontal=True)
+                                p['status'] = new_stat
+                                p['id'] = i
+                                new_parts.append(p)
+                        if st.form_submit_button("저장"):
+                            data['particles'] = new_parts
+                            data['reports'] = new_parts
+                            data['reviewed'] = True
+                            with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                            st.success("저장됨"); st.rerun()
+                else:
+                    st.image(standardize_image_size(img_rgb, 800, 600), caption="No particles", width=800)
+                    st.warning("입자가 없습니다.")
+                    if st.button("➕ 중앙에 추가"):
+                         h, w = img_rgb.shape[:2]
+                         new_p = {"id":0, "box":[int(w*0.3),int(h*0.3),int(w*0.7),int(h*0.7)], "status":"CONTAMINATED", "phi":0, "cyan":0, "orange":0, "manual":True}
+                         data['particles'] = [new_p]; data['reports'] = [new_p]
+                         with open(log_path, 'w') as f: json.dump(data, f, indent=4)
+                         st.rerun()
+            else: st.error("Image missing")
+        except Exception as e: st.error(f"Error: {e}")
 
 if 'admin_mode' not in st.session_state: st.session_state['admin_mode'] = False
 st.sidebar.title("Navigation")
@@ -395,16 +319,15 @@ elif mode == "Real-time Inference":
         if image is None: st.error("Load Failed")
         else:
             try:
-                # Returns RGB image from draw_smart_annotations
-                res_img_rgb, reports = process_frame(image)
+                res_img, reports = process_frame(image)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 fn = f"TFCP_{ts}"
                 cv2.imwrite(os.path.join(IMG_DIR, f"{fn}.jpg"), image)
                 with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
                     json.dump({"filename":f"{fn}.jpg", "timestamp":ts, "reports":reports, "reviewed":False}, f, indent=4)
                 
-                display_img = standardize_image_size(res_img_rgb, 800, 600)
-                with c1: st.image(display_img, caption="Analysis Result", width=800)
+                display_img = standardize_image_size(res_img, 800, 600)
+                with c1: st.image(cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB), caption="Analysis Result", width=800)
                 with c2:
                     st.markdown("### Metrics")
                     if reports:
