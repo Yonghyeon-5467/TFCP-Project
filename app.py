@@ -8,7 +8,6 @@ import json
 import shutil
 from datetime import datetime
 import pandas as pd
-import requests
 
 # --- [1] Page Config & CSS ---
 st.set_page_config(page_title="TFCP Quantitative Analysis System", page_icon="🔬", layout="wide")
@@ -44,28 +43,34 @@ def load_model():
 
 model = load_model()
 
-# --- [3] Visualization Helper (Regular Font) ---
+# --- [3] Visualization Helper (Server-Native Font) ---
 @st.cache_resource
 def get_custom_font(size=20):
-    """Downloads and loads Roboto-Regular for a clean, academic look."""
-    font_path = "Roboto-Regular.ttf"
-    font_url = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Regular.ttf"
+    """
+    Loads DejaVuSans (Standard Linux Font) for reliable rendering.
+    No network request required.
+    """
+    # Priority list of fonts available on Streamlit Cloud (Debian/Linux)
+    font_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # 1st Choice (Bold for readability)
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",       # 2nd Choice (Regular)
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "arial.ttf" # Fallback if uploaded manually
+    ]
     
-    if not os.path.exists(font_path):
-        try:
-            r = requests.get(font_url, timeout=5)
-            if r.status_code == 200:
-                with open(font_path, "wb") as f:
-                    f.write(r.content)
-        except: pass
-
-    try:
-        return ImageFont.truetype(font_path, size)
-    except:
-        return ImageFont.load_default()
+    for font_path in font_candidates:
+        if os.path.exists(font_path):
+            try:
+                return ImageFont.truetype(font_path, size)
+            except:
+                continue
+    
+    return ImageFont.load_default()
 
 def draw_smart_annotations(img_bgr, reports):
-    """Draws annotations using PIL (RGB). Style: Regular font weight."""
+    """
+    Draws professional annotations using PIL (RGB).
+    """
     # Convert BGR to RGB for PIL
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(img_rgb).convert("RGBA")
@@ -231,6 +236,7 @@ def process_frame(img):
         mask_particle_body = np.zeros_like(mask_orange)
         contours, _ = cv2.findContours(cv2.morphologyEx(mask_orange & (valid_mask.astype(np.uint8)*255), cv2.MORPH_CLOSE, np.ones((5,5), np.uint8)), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         p_count = sum(cv2.contourArea(cnt) for cnt in contours if cv2.contourArea(cnt) > 20)
+        
         for cnt in contours:
             if cv2.contourArea(cnt) > 20: cv2.drawContours(mask_particle_body, [cnt], -1, 255, -1)
 
@@ -259,13 +265,13 @@ def process_frame(img):
 
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
     
-    # Use Professional Drawing
+    # Use Professional Drawing with server-native font
     final_img = draw_smart_annotations(img.copy(), reports)
     return final_img, reports
 
 # --- UI (Admin) ---
 def render_admin_page():
-    st.markdown("<h2 class='header-text'>Research Data Management Center</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 class='header-text'>Research Data Management</h2>", unsafe_allow_html=True)
     
     log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
     if not log_files: st.info("No data available."); return
@@ -312,7 +318,7 @@ def render_admin_page():
                 img_corrected = apply_gamma_correction(img_bgr, gamma=0.8)
                 particles = data.get('particles', data.get('reports', []))
                 
-                # Draw using PIL (Smart Annotations)
+                # Draw using PIL (Smart Annotations with System Font)
                 draw_img = draw_smart_annotations(img_corrected.copy(), particles)
                 display_img = standardize_image_size(draw_img, 800, 600)
                 
@@ -331,6 +337,7 @@ def render_admin_page():
                     
                     preview = img_corrected.copy()
                     cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
+                    # For preview, simple cv2 drawing is enough (RGB conversion for st.image)
                     preview_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
                     st.image(standardize_image_size(preview_rgb, 800, 600), caption="Preview", width=800)
                     
@@ -390,7 +397,7 @@ elif mode == "Real-time Inference":
         if image is None: st.error("Load Failed")
         else:
             try:
-                # Use PIL Drawing Logic
+                # Use High-Res drawing
                 res_img_rgb, reports = process_frame(image)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 fn = f"TFCP_{ts}"
