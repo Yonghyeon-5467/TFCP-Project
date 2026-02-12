@@ -47,15 +47,14 @@ model = load_model()
 @st.cache_resource
 def get_custom_font(size=20):
     """
-    Loads DejaVuSans (Standard Linux Font) for reliable rendering.
-    No network request required.
+    Loads DejaVuSans (Standard Linux Font) for reliable rendering on Streamlit Cloud.
     """
-    # Priority list of fonts available on Streamlit Cloud (Debian/Linux)
+    # Priority list of fonts available on Linux/Debian
     font_candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # 1st Choice (Bold for readability)
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",       # 2nd Choice (Regular)
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "arial.ttf" # Fallback if uploaded manually
+        "arial.ttf"
     ]
     
     for font_path in font_candidates:
@@ -65,13 +64,13 @@ def get_custom_font(size=20):
             except:
                 continue
     
+    # Fallback to default if nothing found
     return ImageFont.load_default()
 
 def draw_smart_annotations(img_bgr, reports):
     """
     Draws professional annotations using PIL (RGB).
     """
-    # Convert BGR to RGB for PIL
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(img_rgb).convert("RGBA")
     overlay = Image.new("RGBA", pil_img.size, (0, 0, 0, 0))
@@ -139,11 +138,13 @@ def apply_gamma_correction(image, gamma=0.8):
     table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
     return cv2.LUT(image, table)
 
-def standardize_image_size(img, target_width=800, target_height=600):
+# [v33 수정] 해상도 1280x960으로 상향 & Lanczos4 보간법 적용
+def standardize_image_size(img, target_width=1280, target_height=960):
     h, w = img.shape[:2]
     scale = min(target_width/w, target_height/h)
     nw, nh = int(w*scale), int(h*scale)
-    resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+    # High-quality resizing
+    resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LANCZOS4)
     new_img = np.zeros((target_height, target_width, 3), dtype=np.uint8)
     top, left = (target_height - nh) // 2, (target_width - nw) // 2
     new_img[top:top+nh, left:left+nw] = resized
@@ -265,13 +266,13 @@ def process_frame(img):
 
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
     
-    # Use Professional Drawing with server-native font
+    # Use Professional Drawing
     final_img = draw_smart_annotations(img.copy(), reports)
     return final_img, reports
 
 # --- UI (Admin) ---
 def render_admin_page():
-    st.markdown("<h2 class='header-text'>Research Data Management</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 class='header-text'>Research Data Management Center</h2>", unsafe_allow_html=True)
     
     log_files = sorted([f for f in os.listdir(LOG_DIR) if f.endswith('.json')], reverse=True)
     if not log_files: st.info("No data available."); return
@@ -318,9 +319,9 @@ def render_admin_page():
                 img_corrected = apply_gamma_correction(img_bgr, gamma=0.8)
                 particles = data.get('particles', data.get('reports', []))
                 
-                # Draw using PIL (Smart Annotations with System Font)
+                # Draw using PIL
                 draw_img = draw_smart_annotations(img_corrected.copy(), particles)
-                display_img = standardize_image_size(draw_img, 800, 600)
+                display_img = standardize_image_size(draw_img, 1280, 960) # High-Res Display
                 
                 st.image(display_img, caption=f"Analyzed: {data.get('timestamp','Unknown')}", width=800)
 
@@ -337,7 +338,6 @@ def render_admin_page():
                     
                     preview = img_corrected.copy()
                     cv2.rectangle(preview, (mx1, my1), (mx2, my2), (255, 0, 255), 4)
-                    # For preview, simple cv2 drawing is enough (RGB conversion for st.image)
                     preview_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
                     st.image(standardize_image_size(preview_rgb, 800, 600), caption="Preview", width=800)
                     
@@ -397,7 +397,7 @@ elif mode == "Real-time Inference":
         if image is None: st.error("Load Failed")
         else:
             try:
-                # Use High-Res drawing
+                # Use High-Res drawing & processing
                 res_img_rgb, reports = process_frame(image)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 fn = f"TFCP_{ts}"
@@ -405,7 +405,8 @@ elif mode == "Real-time Inference":
                 with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
                     json.dump({"filename":f"{fn}.jpg", "timestamp":ts, "reports":reports, "reviewed":False}, f, indent=4)
                 
-                display_img = standardize_image_size(res_img_rgb, 800, 600)
+                # Display High-Res (1280x960)
+                display_img = standardize_image_size(res_img_rgb, 1280, 960)
                 with c1: st.image(display_img, caption="Analysis Result", width=800)
                 with c2:
                     st.markdown("### Metrics")
