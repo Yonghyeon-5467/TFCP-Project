@@ -44,58 +44,58 @@ def load_model():
 
 model = load_model()
 
-# --- [3] Visualization Helper (Robust Font Loading) ---
+# --- [3] Visualization Helper (High-Res Font & Layering) ---
 @st.cache_resource
 def get_custom_font(size=20):
     """
-    Loads a scalable TrueType font.
-    Tries to download Roboto, falls back to system fonts if download fails.
+    Loads a scalable TrueType font (Roboto-Regular).
     """
-    font_path = "Roboto-Bold.ttf"
-    # 1. Try Downloading Roboto-Bold
+    font_path = "Roboto-Regular.ttf"
+    # 1. Try Downloading Roboto-Regular (Not Bold)
     if not os.path.exists(font_path):
         try:
-            url = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
+            url = "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Regular.ttf"
             r = requests.get(url, timeout=3)
             if r.status_code == 200:
                 with open(font_path, "wb") as f: f.write(r.content)
         except: pass
 
-    # 2. Try loading the downloaded font
     if os.path.exists(font_path):
         try: return ImageFont.truetype(font_path, size)
         except: pass
     
-    # 3. Fallback: Linux System Fonts (Common in Streamlit Cloud)
-    system_fonts = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
-    ]
-    for sys_font in system_fonts:
-        if os.path.exists(sys_font):
-            try: return ImageFont.truetype(sys_font, size)
-            except: continue
-            
-    # 4. Last Resort: Default Bitmap Font (Might be small)
     return ImageFont.load_default()
 
 def draw_smart_annotations(img_bgr, reports):
     """
-    Draws professional annotations using PIL (RGB).
+    Draws annotations with sorting to ensure CONTAMINATED is on top.
+    Returns RGB image.
     """
+    # Convert to RGB for PIL
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(img_rgb).convert("RGBA")
     overlay = Image.new("RGBA", pil_img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     
     h, w = img_bgr.shape[:2]
-    # Scale for text visibility
+    # Scale for text visibility (Adjusted: Smaller than previous version)
     scale = max(w, h) / 1000.0
-    line_width = max(4, int(6 * scale)) # Thicker box
-    font_size = max(20, int(35 * scale)) # Ensure font is large enough
+    line_width = max(2, int(4 * scale)) 
+    font_size = max(14, int(25 * scale)) # Reduced size
     font = get_custom_font(font_size)
     
-    for r in reports:
+    # [Layering Logic] Sort reports by priority
+    # SAFE (0) -> RECHECK (1) -> CONTAMINATED (2)
+    # Drawing order: Low priority first, High priority last (on top)
+    def get_priority(r):
+        s = r['status']
+        if s == "CONTAMINATED": return 2
+        if s == "RECHECK REQUIRED": return 1
+        return 0
+    
+    reports_sorted = sorted(reports, key=get_priority)
+    
+    for r in reports_sorted:
         x1, y1, x2, y2 = r['box']
         status = r['status']
         p_id = r['id']
@@ -107,8 +107,10 @@ def draw_smart_annotations(img_bgr, reports):
         else:
             color_rgb = (40, 167, 69) # Green
             
+        # Draw Box
         draw.rectangle([x1, y1, x2, y2], outline=color_rgb + (255,), width=line_width)
         
+        # Label Text
         label_txt = f"Area {p_id + 1}"
         if status == "RECHECK REQUIRED": label_txt = "RECHECK"
         elif status == "CONTAMINATED": label_txt += ": CONT"
@@ -118,14 +120,13 @@ def draw_smart_annotations(img_bgr, reports):
             bbox = font.getbbox(label_txt)
             text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
         except:
-            # Fallback for older Pillow versions
             text_w, text_h = draw.textsize(label_txt, font=font)
             
-        pad = int(10 * scale)
+        pad = int(6 * scale)
         lbl_y1 = y1 - text_h - 2*pad
         if lbl_y1 < 0: lbl_y1 = y1
         
-        # Opaque Background for better readability
+        # Opaque Background
         draw.rectangle([x1, lbl_y1, x1 + text_w + 2*pad, lbl_y1 + text_h + 2*pad], fill=color_rgb + (255,))
         draw.text((x1 + pad, lbl_y1 + pad), label_txt, font=font, fill=(255, 255, 255, 255))
         
@@ -236,7 +237,6 @@ def process_frame(img):
         mask_particle_body = np.zeros_like(mask_orange)
         contours, _ = cv2.findContours(cv2.morphologyEx(mask_orange & (valid_mask.astype(np.uint8)*255), cv2.MORPH_CLOSE, np.ones((5,5), np.uint8)), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         p_count = sum(cv2.contourArea(cnt) for cnt in contours if cv2.contourArea(cnt) > 20)
-        
         for cnt in contours:
             if cv2.contourArea(cnt) > 20: cv2.drawContours(mask_particle_body, [cnt], -1, 255, -1)
 
@@ -249,14 +249,11 @@ def process_frame(img):
             mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3,3), np.uint8), iterations=1)
             if p_count < 50: mask_containment_zone = np.ones_like(mask_orange) * 255
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
-            
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(float))
             is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
             is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
-            
             mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255) & mask_containment_zone
             saturated_pixels = np.sum(mask_saturated_valid > 0)
-
             intensity_raw = np.where(is_glare, 0, np.where(is_saturated_cyan, ((g_ch + b_ch)/2.0 - r_ch*0.8), ((g_ch + b_ch)/2.0 - r_ch*1.7)))
             intensity_map = np.clip(intensity_raw, 0, 100)
             cyan_area = (np.sum(mask_cyan>0)/p_count*100) if p_count>0 else 0
@@ -267,7 +264,7 @@ def process_frame(img):
 
         reports.append({"id": i, "status": status, "phi": float(round(phi, 2)), "cyan": float(round(cyan_area, 2)), "orange": float(round(orange_area_pct, 2)), "box": [int(nx1), int(ny1), int(nx2), int(ny2)]})
     
-    # Use PIL Drawing (High Quality)
+    # Use High-Quality PIL Drawing
     final_img = draw_smart_annotations(img.copy(), reports)
     return final_img, reports
 
@@ -320,7 +317,7 @@ def render_admin_page():
                 img_corrected = apply_gamma_correction(img_bgr, gamma=0.8)
                 particles = data.get('particles', data.get('reports', []))
                 
-                # Draw with PIL (Smart Annotations)
+                # Draw using consistent PIL engine
                 draw_img = draw_smart_annotations(img_corrected.copy(), particles)
                 display_img = standardize_image_size(draw_img, 800, 600)
                 
@@ -398,7 +395,7 @@ elif mode == "Real-time Inference":
         if image is None: st.error("Load Failed")
         else:
             try:
-                # Use High-Res drawing
+                # Use Smart Drawing which returns RGB numpy array
                 res_img_rgb, reports = process_frame(image)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 fn = f"TFCP_{ts}"
@@ -406,6 +403,7 @@ elif mode == "Real-time Inference":
                 with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
                     json.dump({"filename":f"{fn}.jpg", "timestamp":ts, "reports":reports, "reviewed":False}, f, indent=4)
                 
+                # Directly display RGB image (no conversion needed)
                 display_img = standardize_image_size(res_img_rgb, 800, 600)
                 with c1: st.image(display_img, caption="Analysis Result", width=800)
                 with c2:
