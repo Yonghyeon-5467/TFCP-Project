@@ -584,9 +584,8 @@ def render_admin_page():
 
             # Draw using PIL
             draw_img = draw_smart_annotations(img_corrected.copy(), particles)
-            st.image(st.session_state.last_result_img, caption="Analysis Result", use_column_width=True)
-
-            st.image(display_img, caption=f"Analyzed: {data.get('timestamp', 'Unknown')}", width=800)
+            display_img = standardize_image_size(draw_img, 1280, 960)
+            st.image(display_img, caption=f"Analyzed: ...", width=800)
 
             with st.expander("➕ Manual Region Injection (Slider)", expanded=False):
                 st.info("Inject ROI manually.")
@@ -687,6 +686,7 @@ elif mode == "Real-time Inference":
         st.session_state.last_img_hash = None
         st.session_state.last_proc_hash = None
         st.session_state.last_proc_img = None
+        st.session_state.last_orig_img = None
         st.session_state.last_scale = 1.0
         st.session_state.last_result_img = None
         st.session_state.last_reports = None
@@ -732,7 +732,6 @@ elif mode == "Real-time Inference":
                 res_img_rgb, reports = process_frame(image_proc)
 
             st.session_state.last_img_hash = img_hash
-            st.session_state.last_orig_img = None
             st.session_state.last_result_img = res_img_rgb
             st.session_state.last_reports = reports
 
@@ -742,8 +741,8 @@ elif mode == "Real-time Inference":
             fn = f"TFCP_{ts_id}"
 
              # ✅ reports를 원본 좌표로 변환
-            inv_scale = 1.0 / float(scale if scale > 0 else 1.0)
-            reports_up = rescale_reports(reports, inv_scale)
+           inv_scale = 1.0 / float(scale if scale > 0 else 1.0)
+           reports_up = rescale_reports(reports, inv_scale)
 
             # ✅ 원본 저장 (선명도 유지)
             cv2.imwrite(
@@ -811,3 +810,4 @@ elif mode == "Real-time Inference":
 
 
         
+
