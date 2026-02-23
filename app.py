@@ -661,22 +661,25 @@ if mode == "Admin Console":
 elif mode == "Real-time Inference":
     st.markdown("<h1 class='header-text'>TFCP Inference Engine</h1>", unsafe_allow_html=True)
     c1, c2 = st.columns([2, 1])
-        # --- [PERF] session_state: 같은 이미지면 재분석/재저장 방지 ---
+
+    # --- [PERF] session_state: 같은 이미지면 재분석/재저장 방지 ---
     if "last_img_hash" not in st.session_state:
-        st.session_state.last_img_hash = None       # 분석 기준 hash
-        st.session_state.last_proc_hash = None      # decode/resize 기준 hash
-        st.session_state.last_proc_img = None       # resize된 이미지
+        st.session_state.last_img_hash = None
+        st.session_state.last_proc_hash = None
+        st.session_state.last_proc_img = None
         st.session_state.last_scale = 1.0
         st.session_state.last_result_img = None
         st.session_state.last_reports = None
         st.session_state.last_saved_id = None
+
+    # --- Input UI ---
     with c1:
         img_file = st.camera_input("Acquire")
         if not img_file:
             img_file = st.file_uploader("Upload", type=['jpg', 'png', 'jpeg'])
 
-        if img_file:
-        # read()는 포인터 문제 생길 수 있어 getvalue() 권장
+    # --- Processing (only when img_file exists) ---
+    if img_file:
         raw = img_file.getvalue()  # bytes
         img_hash = hashlib.sha1(raw).hexdigest()
 
@@ -689,7 +692,6 @@ elif mode == "Real-time Inference":
                 st.error("Load Failed")
                 st.stop()
 
-            # 큰 이미지면 축소해서 처리(성능 핵심)
             image_proc, scale = downscale_if_needed(image, max_side=1280)
 
             st.session_state.last_proc_hash = img_hash
@@ -699,10 +701,8 @@ elif mode == "Real-time Inference":
             image_proc = st.session_state.last_proc_img
             scale = st.session_state.last_scale
 
-        # (선택) 강제로 다시 분석하고 싶을 때만 버튼으로
         rerun = st.button("🔄 Re-run Analysis", use_container_width=True)
 
-        # 분석은 "새 이미지"이거나 "rerun 버튼" 눌렀을 때만
         if rerun or (img_hash != st.session_state.last_img_hash):
             with st.spinner("Analyzing..."):
                 res_img_rgb, reports = process_frame(image_proc)
@@ -711,14 +711,11 @@ elif mode == "Real-time Inference":
             st.session_state.last_result_img = res_img_rgb
             st.session_state.last_reports = reports
 
-            # 저장도 "새 분석"일 때만 1번 수행 (로그 폭증 방지)
             now = datetime.now()
             ts_id = now.strftime("%Y%m%d_%H%M%S_%f")
             ts_display = now.strftime("%Y-%m-%d %H:%M:%S")
-
             fn = f"TFCP_{ts_id}"
 
-            # ⚠️ 좌표/로그가 image_proc 기준이므로 저장도 image_proc로 맞추는 게 안전
             cv2.imwrite(os.path.join(IMG_DIR, f"{fn}.jpg"), image_proc)
 
             with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
@@ -766,6 +763,5 @@ elif mode == "Real-time Inference":
                         """, unsafe_allow_html=True)
                 else:
                     st.warning("No particles")
-        else:
-            st.info("새 이미지를 업로드/촬영하면 자동으로 분석합니다.")
-
+    else:
+        st.info("새 이미지를 업로드/촬영하면 자동으로 분석합니다.")
