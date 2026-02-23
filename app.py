@@ -266,6 +266,26 @@ def downscale_if_needed(img, max_side=1280):
     resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
     return resized, scale
 
+def rescale_reports(reports, inv_scale: float):
+    """
+    downscale된 이미지(image_proc) 기준 box 좌표를 원본(image) 좌표로 복구.
+    inv_scale = 1.0 / scale
+    """
+    if not reports:
+        return []
+    out = []
+    for r in reports:
+        rr = dict(r)
+        x1, y1, x2, y2 = rr.get("box", [0, 0, 0, 0])
+        rr["box"] = [
+            int(x1 * inv_scale),
+            int(y1 * inv_scale),
+            int(x2 * inv_scale),
+            int(y2 * inv_scale),
+        ]
+        out.append(rr)
+    return out
+    
 def calculate_iou(box1, box2):
     b1, b2 = box1.flatten(), box2.flatten()
     ix1, iy1 = max(b1[0], b2[0]), max(b1[1], b2[1])
@@ -564,7 +584,7 @@ def render_admin_page():
 
             # Draw using PIL
             draw_img = draw_smart_annotations(img_corrected.copy(), particles)
-            display_img = standardize_image_size(draw_img, 1280, 960)
+            st.image(st.session_state.last_result_img, caption="Analysis Result", use_column_width=True)
 
             st.image(display_img, caption=f"Analyzed: {data.get('timestamp', 'Unknown')}", width=800)
 
@@ -692,12 +712,16 @@ elif mode == "Real-time Inference":
                 st.error("Load Failed")
                 st.stop()
 
+            # 큰 이미지면 축소해서 처리(성능 핵심)
             image_proc, scale = downscale_if_needed(image, max_side=1280)
 
+            # ✅ 원본/처리본 둘 다 session_state에 보관
             st.session_state.last_proc_hash = img_hash
+            st.session_state.last_orig_img = image          # <-- 추가
             st.session_state.last_proc_img = image_proc
             st.session_state.last_scale = scale
         else:
+            image = st.session_state.last_orig_img          # <-- 추가
             image_proc = st.session_state.last_proc_img
             scale = st.session_state.last_scale
 
@@ -708,6 +732,7 @@ elif mode == "Real-time Inference":
                 res_img_rgb, reports = process_frame(image_proc)
 
             st.session_state.last_img_hash = img_hash
+            st.session_state.last_orig_img = None
             st.session_state.last_result_img = res_img_rgb
             st.session_state.last_reports = reports
 
@@ -716,20 +741,38 @@ elif mode == "Real-time Inference":
             ts_display = now.strftime("%Y-%m-%d %H:%M:%S")
             fn = f"TFCP_{ts_id}"
 
-            cv2.imwrite(os.path.join(IMG_DIR, f"{fn}.jpg"), image_proc)
+             # ✅ reports를 원본 좌표로 변환
+            inv_scale = 1.0 / float(scale if scale > 0 else 1.0)
+            reports_up = rescale_reports(reports, inv_scale)
 
+            # ✅ 원본 저장 (선명도 유지)
+            cv2.imwrite(
+                os.path.join(IMG_DIR, f"{fn}.jpg"),
+                image,
+                [int(cv2.IMWRITE_JPEG_QUALITY), 98]  # 품질도 올림
+            )
+
+            # ✅ JSON도 원본 좌표 기준으로 저장
             with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
                 json.dump({
                     "filename": f"{fn}.jpg",
                     "timestamp": ts_display,
                     "timestamp_id": ts_id,
-                    "reports": reports,
+                    "reports": reports_up,          # <-- 원본 좌표
                     "reviewed": False,
                     "app_version": APP_VERSION,
                     "gamma": 0.8,
                     "input_scale": float(scale),
-                    "note": "Saved resized image for cloud performance."
+                    "note": "Processed on downscaled image; saved original image and original-scale boxes."
                 }, f, indent=4)
+
+            # ✅ 표시용도 원본 기반으로 다시 그림
+            img_corr_orig = apply_gamma_correction(image, gamma=0.8)
+            res_img_rgb = draw_smart_annotations(img_corr_orig.copy(), reports_up)
+
+            st.session_state.last_saved_id = fn
+            st.session_state.last_result_img = res_img_rgb
+            st.session_state.last_reports = reports_up
 
             st.session_state.last_saved_id = fn
 
@@ -765,3 +808,6 @@ elif mode == "Real-time Inference":
                     st.warning("No particles")
     else:
         st.info("새 이미지를 업로드/촬영하면 자동으로 분석합니다.")
+
+
+        
