@@ -741,8 +741,8 @@ elif mode == "Real-time Inference":
             fn = f"TFCP_{ts_id}"
 
              # ✅ reports를 원본 좌표로 변환
-           inv_scale = 1.0 / float(scale if scale > 0 else 1.0)
-           reports_up = rescale_reports(reports, inv_scale)
+            inv_scale = 1.0 / float(scale if scale > 0 else 1.0)
+            reports_up = rescale_reports(reports, inv_scale)
 
             # ✅ 원본 저장 (선명도 유지)
             cv2.imwrite(
@@ -810,4 +810,5 @@ elif mode == "Real-time Inference":
 
 
         
+
 
