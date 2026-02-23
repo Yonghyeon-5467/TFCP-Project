@@ -80,18 +80,26 @@ ADMIN_KEY = _get_secret("TFCP_ADMIN_KEY", "") or os.environ.get("TFCP_ADMIN_KEY"
 
 # --- [3] Visualization Helper (Server-Native Font) ---
 @st.cache_resource
-def get_custom_font(size=20):
+def get_custom_font(size=20, bold=False):
     """
-    Loads DejaVuSans (Standard Linux Font) for reliable rendering on Streamlit Cloud.
+    Arial과 가장 유사한 Liberation Sans를 우선 사용.
+    (Streamlit Cloud/Linux에서 Arial.ttf는 거의 없어서 대체 폰트가 필요)
     """
-    font_candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "arial.ttf"
+    # (선택) 레포에 fonts 폴더를 만들고 넣어두면 가장 확실하게 동일 폰트가 나옴
+    local_candidates = [
+        "fonts/LiberationSans-Bold.ttf" if bold else "fonts/LiberationSans-Regular.ttf",
+        # Arial 파일은 라이선스 문제될 수 있어(특히 배포) 로컬에 직접 넣는 건 비권장
+        "fonts/arialbd.ttf" if bold else "fonts/arial.ttf",
     ]
 
-    for font_path in font_candidates:
+    # 시스템 폰트 후보 (Streamlit Cloud가 어떤 Debian을 쓰든 경로가 다를 수 있어 둘 다 체크)
+    system_candidates = [
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+
+    for font_path in local_candidates + system_candidates:
         if os.path.exists(font_path):
             try:
                 return ImageFont.truetype(font_path, size)
@@ -100,12 +108,14 @@ def get_custom_font(size=20):
 
     return ImageFont.load_default()
 
-def draw_smart_annotations(img_bgr, reports):
+def draw_smart_annotations(img_bgr, reports, show_box_labels=True, show_global_label=False):
     """
-    Draws professional annotations using PIL (RGB).
-    - [FIX] box/status 키가 누락된 로그에도 최대한 안전하게 동작하도록 방어 로직 추가
-    - [FIX] 좌표를 이미지 경계로 clamp
+    - Arial 유사(Liberation Sans) 폰트 사용
+    - 라벨 배경은 검정색
+    - 라벨 글자는 상태색(빨강/주황/초록)
+    - 샘플 이미지처럼: 보통 박스 좌상단에 "Contaminated" 같은 상태 라벨을 표시
     """
+
     if img_bgr is None:
         return None
 
@@ -116,25 +126,77 @@ def draw_smart_annotations(img_bgr, reports):
 
     h, w = img_bgr.shape[:2]
 
+    # 스케일 (작은 이미지에서도 너무 작아지지 않게)
     scale = max(w, h) / 1200.0
-    line_width = max(2, int(4 * scale))
-    font_size = max(16, int(26 * scale))
-    font = get_custom_font(font_size)
+    line_width = max(1, int(3 * scale))
+    font_size = max(14, int(24 * scale))
+    pad = max(4, int(6 * scale))
 
-    def get_priority(r):
-        s = (r.get('status') or "SAFE")
-        if s == "CONTAMINATED": return 2
-        if s == "RECHECK REQUIRED": return 1
-        return 0
+    font = get_custom_font(font_size, bold=False)
 
-    reports_sorted = sorted(reports or [], key=get_priority)
+    def status_color(status: str):
+        if status == "CONTAMINATED":
+            return (220, 53, 69)   # red
+        if status == "RECHECK REQUIRED":
+            return (253, 126, 20)  # orange
+        return (40, 167, 69)       # green
+
+    def status_text(status: str):
+        if status == "CONTAMINATED":
+            return "Contaminated"
+        if status == "RECHECK REQUIRED":
+            return "Recheck"
+        return "Safe"
+
+    def measure_text(text: str):
+        try:
+            bbox = font.getbbox(text)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        except Exception:
+            tw, th = draw.textsize(text, font=font)
+        return tw, th
+
+    def draw_label(x, y, text, fg_rgb):
+        # 라벨 배경: 검정색(약간 반투명)
+        bg_rgba = (0, 0, 0, 220)
+
+        tw, th = measure_text(text)
+        bw, bh = tw + 2 * pad, th + 2 * pad
+
+        # 화면 밖으로 나가지 않게 보정
+        x = max(0, min(x, w - bw - 1))
+        y = max(0, min(y, h - bh - 1))
+
+        draw.rectangle([x, y, x + bw, y + bh], fill=bg_rgba)
+        draw.text((x + pad, y + pad), text, font=font, fill=fg_rgb + (255,))
+
+    # (선택) 전체 상태 라벨을 좌상단에 1개만 표시하고 싶으면 사용
+    if show_global_label and reports:
+        overall = "SAFE"
+        for r in reports:
+            s = r.get("status", "SAFE")
+            if s == "CONTAMINATED":
+                overall = "CONTAMINATED"
+                break
+            elif s == "RECHECK REQUIRED":
+                overall = "RECHECK REQUIRED"
+
+        draw_label(8, 8, status_text(overall), status_color(overall))
+
+    # contaminated가 마지막에 그려지도록 정렬(겹칠 때 위로 보이게)
+    def priority(r):
+        s = r.get("status", "SAFE")
+        return 2 if s == "CONTAMINATED" else 1 if s == "RECHECK REQUIRED" else 0
+
+    reports_sorted = sorted(reports or [], key=priority)
 
     for r in reports_sorted:
-        box = r.get('box', None)
+        box = r.get("box", None)
         if not box or len(box) != 4:
             continue
 
-        x1, y1, x2, y2 = [int(v) for v in box]
+        x1, y1, x2, y2 = map(int, box)
+
         # clamp
         x1 = max(0, min(x1, w - 1))
         x2 = max(0, min(x2, w - 1))
@@ -143,46 +205,27 @@ def draw_smart_annotations(img_bgr, reports):
         if x2 <= x1 or y2 <= y1:
             continue
 
-        status = (r.get('status') or "SAFE")
-        p_id = int(r.get('id', 0))
+        status = r.get("status", "SAFE")
+        col = status_color(status)
 
-        if status == "CONTAMINATED":
-            color_rgb = (220, 53, 69)  # Red
-        elif status == "RECHECK REQUIRED":
-            color_rgb = (253, 126, 20)  # Orange
-        else:
-            color_rgb = (40, 167, 69)  # Green
+        # 박스
+        draw.rectangle([x1, y1, x2, y2], outline=col + (255,), width=line_width)
 
-        draw.rectangle([x1, y1, x2, y2], outline=color_rgb + (255,), width=line_width)
+        # 박스 라벨(샘플처럼 Contaminated 등만 표시)
+        if show_box_labels:
+            txt = status_text(status)
 
-        label_txt = f"Area {p_id + 1}"
-        if status == "RECHECK REQUIRED":
-            label_txt = "RECHECK"
-        elif status == "CONTAMINATED":
-            label_txt += ": CONT"
-        else:
-            label_txt += ": SAFE"
+            # 박스 위에 라벨을 올리되, 공간이 없으면 박스 안쪽에
+            tw, th = measure_text(txt)
+            label_h = th + 2 * pad
+            ly = y1 - label_h
+            if ly < 0:
+                ly = y1 + 2
 
-        try:
-            bbox = font.getbbox(label_txt)
-            text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        except Exception:
-            text_w, text_h = draw.textsize(label_txt, font=font)
-
-        pad = int(8 * scale)
-        lbl_y1 = y1 - text_h - 2 * pad
-        if lbl_y1 < 0:
-            lbl_y1 = y1
-
-        draw.rectangle(
-            [x1, lbl_y1, x1 + text_w + 2 * pad, lbl_y1 + text_h + 2 * pad],
-            fill=color_rgb + (210,)
-        )
-        draw.text((x1 + pad, lbl_y1 + pad), label_txt, font=font, fill=(255, 255, 255, 255))
+            draw_label(x1, ly, txt, col)
 
     final_img = Image.alpha_composite(pil_img, overlay)
     return np.array(final_img.convert("RGB"))
-
 # --- [4] Core Analysis Engine (v10.2.2 Logic) ---
 
 def apply_gamma_correction(image, gamma=0.8):
@@ -725,3 +768,4 @@ elif mode == "Real-time Inference":
                     st.warning("No particles")
         else:
             st.info("새 이미지를 업로드/촬영하면 자동으로 분석합니다.")
+
