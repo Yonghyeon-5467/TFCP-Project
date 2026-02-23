@@ -1,3 +1,4 @@
+import hashlib
 import streamlit as st
 import cv2
 import numpy as np
@@ -17,7 +18,17 @@ try:
 except Exception:
     torch = None
     _TORCH_OK = False
+try:
+    cv2.setNumThreads(1)  # OpenCV가 코어 다 쓰는 것 방지
+except Exception:
+    pass
 
+if _TORCH_OK:
+    try:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except Exception:
+        pass
 # --- [1] Page Config & CSS ---
 st.set_page_config(page_title="TFCP Quantitative Analysis System", page_icon="🔬", layout="wide")
 
@@ -196,6 +207,22 @@ def standardize_image_size(img, target_width=1280, target_height=960, bg_value=0
     new_img[top:top + nh, left:left + nw] = resized
     return new_img
 
+def downscale_if_needed(img, max_side=1280):
+    """
+    큰 이미지(예: 폰 사진)를 그대로 처리하면 매우 무거워짐 → 자동 축소
+    max_side: 긴 변 기준 최대 픽셀
+    """
+    h, w = img.shape[:2]
+    m = max(h, w)
+    if m <= max_side:
+        return img, 1.0
+
+    scale = max_side / float(m)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return resized, scale
+
 def calculate_iou(box1, box2):
     b1, b2 = box1.flatten(), box2.flatten()
     ix1, iy1 = max(b1[0], b2[0]), max(b1[1], b2[1])
@@ -291,7 +318,7 @@ def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45):
     ai_raw_boxes = []
     if model is not None:
         try:
-            results = model.predict(source=img_corr, conf=model_conf, iou=model_iou, verbose=False)
+            results = model.predict(source=img_corr, conf=model_conf, iou=model_iou, imgsz=640, verbose=False)
             ai_raw_boxes = filter_nested_boxes(results[0].boxes)
         except Exception:
             ai_raw_boxes = []
@@ -591,67 +618,110 @@ if mode == "Admin Console":
 elif mode == "Real-time Inference":
     st.markdown("<h1 class='header-text'>TFCP Inference Engine</h1>", unsafe_allow_html=True)
     c1, c2 = st.columns([2, 1])
+        # --- [PERF] session_state: 같은 이미지면 재분석/재저장 방지 ---
+    if "last_img_hash" not in st.session_state:
+        st.session_state.last_img_hash = None       # 분석 기준 hash
+        st.session_state.last_proc_hash = None      # decode/resize 기준 hash
+        st.session_state.last_proc_img = None       # resize된 이미지
+        st.session_state.last_scale = 1.0
+        st.session_state.last_result_img = None
+        st.session_state.last_reports = None
+        st.session_state.last_saved_id = None
     with c1:
         img_file = st.camera_input("Acquire")
         if not img_file:
             img_file = st.file_uploader("Upload", type=['jpg', 'png', 'jpeg'])
 
-    if img_file:
-        file_bytes = np.asarray(bytearray(img_file.read()), dtype=np.uint8)
-        image = cv2.imdecode(file_bytes, 1)
-        if image is None:
-            st.error("Load Failed")
+        if img_file:
+        # read()는 포인터 문제 생길 수 있어 getvalue() 권장
+        raw = img_file.getvalue()  # bytes
+        img_hash = hashlib.sha1(raw).hexdigest()
+
+        # decode/resize는 이미지가 바뀔 때만 수행
+        if img_hash != st.session_state.last_proc_hash:
+            file_bytes = np.frombuffer(raw, dtype=np.uint8)
+            image = cv2.imdecode(file_bytes, 1)
+
+            if image is None:
+                st.error("Load Failed")
+                st.stop()
+
+            # 큰 이미지면 축소해서 처리(성능 핵심)
+            image_proc, scale = downscale_if_needed(image, max_side=1280)
+
+            st.session_state.last_proc_hash = img_hash
+            st.session_state.last_proc_img = image_proc
+            st.session_state.last_scale = scale
         else:
-            try:
-                res_img_rgb, reports = process_frame(image)
+            image_proc = st.session_state.last_proc_img
+            scale = st.session_state.last_scale
 
-                now = datetime.now()
-                ts_id = now.strftime("%Y%m%d_%H%M%S_%f")   # [FIX] 동시 요청 충돌 방지
-                ts_display = now.strftime("%Y-%m-%d %H:%M:%S")
+        # (선택) 강제로 다시 분석하고 싶을 때만 버튼으로
+        rerun = st.button("🔄 Re-run Analysis", use_container_width=True)
 
-                fn = f"TFCP_{ts_id}"
-                cv2.imwrite(os.path.join(IMG_DIR, f"{fn}.jpg"), image)
+        # 분석은 "새 이미지"이거나 "rerun 버튼" 눌렀을 때만
+        if rerun or (img_hash != st.session_state.last_img_hash):
+            with st.spinner("Analyzing..."):
+                res_img_rgb, reports = process_frame(image_proc)
 
-                with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
-                    json.dump({
-                        "filename": f"{fn}.jpg",
-                        "timestamp": ts_display,
-                        "timestamp_id": ts_id,
-                        "reports": reports,
-                        "reviewed": False,
-                        "app_version": APP_VERSION,
-                        "gamma": 0.8
-                    }, f, indent=4)
+            st.session_state.last_img_hash = img_hash
+            st.session_state.last_result_img = res_img_rgb
+            st.session_state.last_reports = reports
 
-                display_img = standardize_image_size(res_img_rgb, 1280, 960)
-                with c1:
-                    st.image(display_img, caption="Analysis Result", width=800)
+            # 저장도 "새 분석"일 때만 1번 수행 (로그 폭증 방지)
+            now = datetime.now()
+            ts_id = now.strftime("%Y%m%d_%H%M%S_%f")
+            ts_display = now.strftime("%Y-%m-%d %H:%M:%S")
 
-                with c2:
-                    st.markdown("### Metrics")
-                    if reports:
-                        # 요약 카운트
-                        n_cont = sum(1 for r in reports if r.get('status') == "CONTAMINATED")
-                        n_rechk = sum(1 for r in reports if r.get('status') == "RECHECK REQUIRED")
-                        n_safe = sum(1 for r in reports if r.get('status') == "SAFE")
+            fn = f"TFCP_{ts_id}"
 
-                        st.markdown(f"- SAFE: **{n_safe}**  \n- CONT: **{n_cont}**  \n- RECHECK: **{n_rechk}**")
+            # ⚠️ 좌표/로그가 image_proc 기준이므로 저장도 image_proc로 맞추는 게 안전
+            cv2.imwrite(os.path.join(IMG_DIR, f"{fn}.jpg"), image_proc)
 
-                        for r in reports:
-                            cls = "status-cont" if r['status'] == "CONTAMINATED" else "status-safe" if r[
-                                                                                                          'status'] == "SAFE" else "status-warn"
-                            st.markdown(f"""
-                            <div class="metric-card">
-                                <div><strong>Area {r['id'] + 1}</strong></div>
-                                <div class="{cls}">{r['status']}</div>
-                                <div style="font-size:0.85em; color:#666; margin-top:5px;">
-                                    Φ: {r['phi']}<br>
-                                    Cyan: {r['cyan']}%<br>
-                                    Orange: {r['orange']}%
-                                </div>
+            with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
+                json.dump({
+                    "filename": f"{fn}.jpg",
+                    "timestamp": ts_display,
+                    "timestamp_id": ts_id,
+                    "reports": reports,
+                    "reviewed": False,
+                    "app_version": APP_VERSION,
+                    "gamma": 0.8,
+                    "input_scale": float(scale),
+                    "note": "Saved resized image for cloud performance."
+                }, f, indent=4)
+
+            st.session_state.last_saved_id = fn
+
+        # --- 결과 표시 (이미 계산된 결과 재사용) ---
+        if st.session_state.last_result_img is not None:
+            display_img = standardize_image_size(st.session_state.last_result_img, 1280, 960)
+            with c1:
+                st.image(display_img, caption="Analysis Result", width=800)
+
+            reports = st.session_state.last_reports or []
+            with c2:
+                st.markdown("### Metrics")
+                if reports:
+                    n_cont = sum(1 for r in reports if r.get('status') == "CONTAMINATED")
+                    n_rechk = sum(1 for r in reports if r.get('status') == "RECHECK REQUIRED")
+                    n_safe = sum(1 for r in reports if r.get('status') == "SAFE")
+                    st.markdown(f"- SAFE: **{n_safe}**  \n- CONT: **{n_cont}**  \n- RECHECK: **{n_rechk}**")
+
+                    for r in reports:
+                        cls = "status-cont" if r['status'] == "CONTAMINATED" else "status-safe" if r['status'] == "SAFE" else "status-warn"
+                        st.markdown(f"""
+                        <div class="metric-card">
+                            <div><strong>Area {r['id'] + 1}</strong></div>
+                            <div class="{cls}">{r['status']}</div>
+                            <div style="font-size:0.85em; color:#666; margin-top:5px;">
+                                Φ: {r['phi']}<br>
+                                Cyan: {r['cyan']}%<br>
+                                Orange: {r['orange']}%
                             </div>
-                            """, unsafe_allow_html=True)
-                    else:
-                        st.warning("No particles")
-            except Exception as e:
-                st.error(f"Error: {e}")
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.warning("No particles")
+        else:
+            st.info("새 이미지를 업로드/촬영하면 자동으로 분석합니다.")
