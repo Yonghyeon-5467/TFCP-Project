@@ -267,6 +267,178 @@ def downscale_if_needed(img, max_side=1280):
     resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
     return resized, scale
 
+# --- [PREPROC] Conditional Blue Suppression (only when NO green & strong blue cast) ---
+
+def _resize_for_metrics(img_bgr, max_side=320):
+    """
+    Fast downscale for metric calculation (performance-friendly).
+    Returns: (small_img, scale)
+    """
+    h, w = img_bgr.shape[:2]
+    m = max(h, w)
+    if m <= max_side:
+        return img_bgr, 1.0
+    scale = max_side / float(m)
+    nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+    small = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_AREA)
+    return small, scale
+
+
+def analyze_green_blue_conditions(
+    img_bgr,
+    sample_max_side=320,
+    min_v=40,
+    min_g=60,
+    green_dom_diff=30,
+    b_floor_percentile=15,
+):
+    """
+    Returns quick global metrics used to decide whether to suppress blue cast.
+
+    green_ratio:
+      fraction of pixels that look "green-dominant" (strong green fluorescence signature)
+      definition: G is clearly higher than both B and R.
+
+    blue_dom90:
+      90th percentile of (B - max(G, R)) on valid pixels
+      -> high value means "blue dominates" (blue cast/backlight)
+
+    b90:
+      90th percentile of B on valid pixels
+      -> prevents triggering in dark scenes
+
+    b_floor:
+      percentile of B (on valid pixels) used as "blue minimum" (ImageJ-like baseline)
+    """
+    small, _ = _resize_for_metrics(img_bgr, max_side=sample_max_side)
+
+    b, g, r = cv2.split(small.astype(np.int16))
+    v = np.maximum(np.maximum(b, g), r)  # brightness proxy
+    valid = v > int(min_v)
+
+    valid_n = int(np.count_nonzero(valid))
+    if valid_n <= 0:
+        return {
+            "valid_px": 0,
+            "green_ratio": 0.0,
+            "blue_dom90": 0.0,
+            "b90": 0.0,
+            "b_floor": float(np.percentile(b.astype(np.float32), b_floor_percentile)),
+        }
+
+    # green-dominant pixels (strong green fluorescence-like signature)
+    green_dom = (g > int(min_g)) & ((g - np.maximum(b, r)) > int(green_dom_diff)) & valid
+    green_ratio = float(np.count_nonzero(green_dom) / valid_n)
+
+    # blue cast strength
+    blue_over = (b - np.maximum(g, r))
+    blue_dom90 = float(np.percentile(blue_over[valid], 90))
+    b90 = float(np.percentile(b[valid], 90))
+
+    # blue baseline ("minimum") estimate (computed on small image for performance)
+    b_floor = float(np.percentile(b[valid].astype(np.float32), b_floor_percentile))
+
+    return {
+        "valid_px": valid_n,
+        "green_ratio": green_ratio,
+        "blue_dom90": blue_dom90,
+        "b90": b90,
+        "b_floor": b_floor,
+    }
+
+
+def apply_blue_minimum_raise(img_bgr, b_floor, strength=0.8, cap_delta=25):
+    """
+    ImageJ 'Color Balance: Blue minimum 증가'에 가까운 효과:
+    - B 채널에서 baseline(b_floor)을 strength 만큼 빼줌 (clip)
+    - (선택) B가 G보다 과도하게 커지지 않도록 cap (cyan은 G도 같이 높아서 상대적으로 보존됨)
+
+    NOTE: only modifies Blue channel
+    """
+    b, g, r = cv2.split(img_bgr.astype(np.float32))
+
+    b2 = b - (float(strength) * float(b_floor))
+    b2 = np.clip(b2, 0.0, 255.0)
+
+    # cyan 보존용 안전장치(파란 백라이트처럼 B만 튀는 걸 눌러줌)
+    if cap_delta is not None and cap_delta >= 0:
+        cap = g + float(cap_delta)
+        b2 = np.minimum(b2, cap)
+
+    out = cv2.merge([b2.astype(np.uint8), g.astype(np.uint8), r.astype(np.uint8)])
+    return out
+
+
+def conditional_blue_suppression(
+    img_bgr,
+    enabled=True,
+    # condition thresholds
+    green_ratio_thr=0.002,      # green-dominant pixel ratio threshold (0.2%)
+    blue_dom90_thr=18.0,        # blue dominance threshold
+    b90_thr=140.0,              # blue brightness threshold (avoid dark images)
+    # correction params
+    b_floor_percentile=15,
+    cap_delta=25,
+    strength_min=0.55,
+    strength_max=1.0,
+    severity_scale=60.0,
+):
+    """
+    Apply blue suppression ONLY when:
+      - green fluorescence is absent (green_ratio < green_ratio_thr)
+      - blue cast is strong (blue_dom90 >= thr AND b90 >= thr)
+
+    Returns: (img_out, meta_dict)
+    """
+    meta = {"enabled": bool(enabled), "applied": False}
+    if not enabled:
+        return img_bgr, meta
+
+    m = analyze_green_blue_conditions(
+        img_bgr,
+        sample_max_side=320,
+        min_v=40,
+        min_g=60,
+        green_dom_diff=30,
+        b_floor_percentile=b_floor_percentile,
+    )
+    meta.update(m)
+
+    green_present = (m["green_ratio"] >= float(green_ratio_thr))
+    blue_cast = (m["blue_dom90"] >= float(blue_dom90_thr)) and (m["b90"] >= float(b90_thr))
+    meta["green_present"] = green_present
+    meta["blue_cast"] = blue_cast
+
+    if (not green_present) and blue_cast:
+        # severity -> strength (mild cast: gentle, strong cast: stronger)
+        sev = (m["blue_dom90"] - float(blue_dom90_thr)) / float(severity_scale if severity_scale > 0 else 60.0)
+        sev = float(np.clip(sev, 0.0, 1.0))
+        strength = float(strength_min + (strength_max - strength_min) * sev)
+
+        out = apply_blue_minimum_raise(
+            img_bgr,
+            b_floor=m["b_floor"],
+            strength=strength,
+            cap_delta=cap_delta,
+        )
+
+        meta["applied"] = True
+        meta["severity"] = sev
+        meta["strength"] = strength
+        meta["cap_delta"] = cap_delta
+        meta["b_floor_percentile"] = b_floor_percentile
+        meta["green_ratio_thr"] = green_ratio_thr
+        meta["blue_dom90_thr"] = blue_dom90_thr
+        meta["b90_thr"] = b90_thr
+        return out, meta
+
+    meta["green_ratio_thr"] = green_ratio_thr
+    meta["blue_dom90_thr"] = blue_dom90_thr
+    meta["b90_thr"] = b90_thr
+    meta["b_floor_percentile"] = b_floor_percentile
+    meta["cap_delta"] = cap_delta
+    return img_bgr, meta
+
 def rescale_reports(reports, inv_scale: float):
     """
     downscale된 이미지(image_proc) 기준 box 좌표를 원본(image) 좌표로 복구.
@@ -367,18 +539,34 @@ def _box_to_xyxy_int(box):
     x1, y1, x2, y2 = map(int, coords)
     return x1, y1, x2, y2
 
-def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45):
+def process_frame(
+    img,
+    gamma=0.8,
+    model_conf=0.10,
+    model_iou=0.45,
+    # --- NEW: conditional blue suppression ---
+    blue_fix=True,
+    green_ratio_thr=0.002,
+    blue_dom90_thr=18.0,
+    b90_thr=140.0,
+    b_floor_percentile=15,
+    blue_cap_delta=25,
+):
     """
-    [FIX 1] AI box ROI의 색 픽셀 체크에서 np.sum(inRange)는 255*픽셀수 → 임계값이 의미없어짐.
-            cv2.countNonZero로 픽셀수를 직접 비교하도록 수정.
-    [FIX 2] p_count(컨투어 면적 합)과 mask 픽셀 수를 섞어 쓰던 부분을 '픽셀 수' 기준으로 통일.
-            (cyan_area, orange_area_pct 계산이 더 일관적)
-    [FIX 3] 실시간(inference)과 admin의 표시 이미지가 서로 달랐음(원본 vs gamma) → gamma 보정 이미지를 기준으로 통일.
-    """
-    img_corr = apply_gamma_correction(img, gamma=gamma)
-    hsv = cv2.cvtColor(img_corr, cv2.COLOR_BGR2HSV)
-    img_h, img_w = img_corr.shape[:2]
+    TFCP core analysis + (optional) conditional blue suppression.
 
+    Blue suppression is applied ONLY when:
+      - green-dominant pixels are almost absent
+      - blue cast/backlight is strong
+
+    Returns:
+      final_img_rgb, reports, preproc_meta
+    """
+
+    # 1) gamma correction
+    img_corr = apply_gamma_correction(img, gamma=gamma)
+
+    # 2) YOLO detection (keep model distribution as close as possible: gamma만 적용)
     ai_raw_boxes = []
     if model is not None:
         try:
@@ -387,6 +575,21 @@ def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45):
         except Exception:
             ai_raw_boxes = []
 
+    # 3) NEW: conditional blue suppression for HSV/intensity analysis
+    img_anl, pre = conditional_blue_suppression(
+        img_corr,
+        enabled=blue_fix,
+        green_ratio_thr=green_ratio_thr,
+        blue_dom90_thr=blue_dom90_thr,
+        b90_thr=b90_thr,
+        b_floor_percentile=b_floor_percentile,
+        cap_delta=blue_cap_delta,
+    )
+
+    hsv = cv2.cvtColor(img_anl, cv2.COLOR_BGR2HSV)
+    img_h, img_w = img_anl.shape[:2]
+
+    # 4) validate boxes using corrected HSV
     combined_boxes = []
     ORANGE_LO = np.array([0, 35, 35])
     ORANGE_HI = np.array([60, 255, 255])
@@ -397,32 +600,32 @@ def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45):
         x1, y1, x2, y2 = _box_to_xyxy_int(box)
         if (x2 - x1) < 50 or (y2 - y1) < 50:
             continue
+
         roi_hsv = hsv[max(0, y1):min(img_h, y2), max(0, x1):min(img_w, x2)]
         if roi_hsv.size == 0:
             continue
 
-        # [FIX] 픽셀 수 기반으로 체크
         mask_o = cv2.inRange(roi_hsv, ORANGE_LO, ORANGE_HI)
         mask_c = cv2.inRange(roi_hsv, CYAN_LO, CYAN_HI)
         color_px = cv2.countNonZero(mask_o) + cv2.countNonZero(mask_c)
 
-        if color_px > 200:  # 기존 200은 사실상 1픽셀만 있어도 통과였음
+        if color_px > 200:
             combined_boxes.append((box, "AI"))
 
     if not combined_boxes:
-        for cv_box in detect_particles_heuristically(img_corr):
+        for cv_box in detect_particles_heuristically(img_anl):
             combined_boxes.append((cv_box, "CV_BACKUP"))
 
+    # 5) ROI analysis
     reports = []
 
-    MIN_BODY_PX = 120         # particle body(orange) 최소 픽셀수
-    MIN_ORANGE_PCT = 3.0      # box 대비 orange 최소 점유율
-    MIN_COMP_AREA = 20        # 작은 노이즈 contour 제거
+    MIN_BODY_PX = 120
+    MIN_ORANGE_PCT = 3.0
+    MIN_COMP_AREA = 20
 
     for i, (box, method) in enumerate(combined_boxes):
         x1, y1, x2, y2 = _box_to_xyxy_int(box)
 
-        # pad 확장
         pad = int((x2 - x1) * 0.15)
         nx1 = max(0, x1 - pad)
         ny1 = max(0, y1 - pad)
@@ -430,14 +633,13 @@ def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45):
         ny2 = min(img_h, y2 + pad)
 
         roi_hsv = hsv[ny1:ny2, nx1:nx2]
-        roi_img = img_corr[ny1:ny2, nx1:nx2]
+        roi_img = img_anl[ny1:ny2, nx1:nx2]
         if roi_hsv.size == 0:
             continue
 
         valid_mask = (roi_hsv[:, :, 1] > 25) & (roi_hsv[:, :, 2] > 25)
         valid_u8 = (valid_mask.astype(np.uint8) * 255)
 
-        # body(orange) mask
         mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([60, 255, 255]))
         mask_orange_valid = cv2.bitwise_and(mask_orange, valid_u8)
         mask_orange_closed = cv2.morphologyEx(mask_orange_valid, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
@@ -449,7 +651,6 @@ def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45):
             if cv2.contourArea(cnt) > MIN_COMP_AREA:
                 cv2.drawContours(mask_particle_body, [cnt], -1, 255, -1)
 
-        # [FIX] 픽셀 수 기준으로 통일
         body_area_px = int(cv2.countNonZero(mask_particle_body))
 
         box_area = int((nx2 - nx1) * (ny2 - ny1))
@@ -461,15 +662,12 @@ def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45):
             cyan_area = 0.0
             avg_int = 0.0
         else:
-            # containment zone
             mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3, 3), np.uint8), iterations=1)
 
-            # cyan mask
             mask_cyan_candidate = cv2.inRange(roi_hsv, CYAN_LO, CYAN_HI)
             mask_cyan_candidate = cv2.bitwise_and(mask_cyan_candidate, valid_u8)
             mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
 
-            # intensity map
             b_ch, g_ch, r_ch = cv2.split(roi_img.astype(np.float32))
             is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
             is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
@@ -495,7 +693,6 @@ def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45):
             phi = cyan_area * (avg_int / 10.0)
 
             status = "CONTAMINATED" if (phi > 5.0 or saturated_pixels > 20) else "SAFE"
-            # saturated_pixels로 CONT 판단된 경우, phi가 낮을 수 있어 sentinel 값 유지(기존 의도 존중)
             if status == "CONTAMINATED" and phi < 5.0:
                 phi = 99.9
 
@@ -506,13 +703,13 @@ def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45):
             "cyan": float(round(cyan_area, 2)),
             "orange": float(round(orange_area_pct, 2)),
             "box": [int(nx1), int(ny1), int(nx2), int(ny2)],
-            "method": method
+            "method": method,
         })
 
-    # [FIX] 표시용 이미지를 gamma 보정본으로 통일
-    final_img = draw_smart_annotations(img_corr.copy(), reports)
-    return final_img, reports
-
+    # 6) draw on analyzed image (gamma + maybe blue fix)
+    final_img = draw_smart_annotations(img_anl.copy(), reports)
+    return final_img, reports, pre
+    
 # --- UI (Admin) ---
 def render_admin_page():
     st.markdown("<h2 class='header-text'>Research Data Management Center</h2>", unsafe_allow_html=True)
@@ -877,4 +1074,5 @@ elif mode == "Real-time Inference":
                     )
                 else:
                     st.warning("No particles detected.")
+
 
