@@ -373,7 +373,7 @@ def conditional_blue_suppression(
     img_bgr,
     enabled=True,
     # condition thresholds
-    green_ratio_thr=0.002,      # green-dominant pixel ratio threshold (0.2%)
+    green_ratio_thr=0.01,      # green-dominant pixel ratio threshold (0.2%)
     blue_dom90_thr=18.0,        # blue dominance threshold
     b90_thr=140.0,              # blue brightness threshold (avoid dark images)
     # correction params
@@ -1043,6 +1043,7 @@ elif mode == "Real-time Inference":
 
             with c2:
                 st.markdown("### Metrics")
+
 
 
 
