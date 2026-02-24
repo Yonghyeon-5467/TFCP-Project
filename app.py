@@ -822,8 +822,15 @@ elif mode == "Real-time Inference":
         if st.session_state.last_result_img is not None:
             with c1:
                 if hq_display:
+                    st.image(
+                        st.session_state.last_result_img,
+                        caption="Analysis Result",
+                        use_column_width=True
+                    )
                 else:
-                    display_img = standardize_image_size(st.session_state.last_result_img, 1280, 960)
+                    display_img = standardize_image_size(
+                        st.session_state.last_result_img, 1280, 960
+                    )
                     st.image(display_img, caption="Analysis Result", width=800)
 
             reports = st.session_state.last_reports or []
@@ -870,3 +877,4 @@ elif mode == "Real-time Inference":
                     )
                 else:
                     st.warning("No particles detected.")
+
