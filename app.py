@@ -1014,65 +1014,34 @@ elif mode == "Real-time Inference":
                 st.session_state.last_saved_id = fn
                 st.session_state.last_saved_hash = img_hash
 
-        # --- Display ---
-        if st.session_state.last_result_img is not None:
+              # --- Display ---
+        if (st.session_state.last_result_img is not None) and (st.session_state.last_orig_img is not None):
             with c1:
-                if hq_display:
-                    st.image(
-                        st.session_state.last_result_img,
-                        caption="Analysis Result",
-                        use_column_width=True
-                    )
-                else:
-                    display_img = standardize_image_size(
-                        st.session_state.last_result_img, 1280, 960
-                    )
-                    st.image(display_img, caption="Analysis Result", width=800)
+                view_mode = st.radio(
+                    "View mode",
+                    ["Compare (Original vs Result)", "Result only", "Original only"],
+                    horizontal=True,
+                    label_visibility="collapsed"
+                )
+
+                orig_rgb = cv2.cvtColor(st.session_state.last_orig_img, cv2.COLOR_BGR2RGB)
+
+                if view_mode == "Compare (Original vs Result)":
+                    lc, rc = st.columns(2)
+                    with lc:
+                        st.image(orig_rgb, caption="Original", use_column_width=True)
+                    with rc:
+                        st.image(st.session_state.last_result_img, caption="Result (processed/annotated)", use_column_width=True)
+
+                elif view_mode == "Original only":
+                    st.image(orig_rgb, caption="Original", use_column_width=True)
+
+                else:  # Result only
+                    st.image(st.session_state.last_result_img, caption="Result (processed/annotated)", use_column_width=True)
 
             reports = st.session_state.last_reports or []
 
             with c2:
                 st.markdown("### Metrics")
-
-                if reports:
-                    n_cont = sum(1 for r in reports if r.get("status") == "CONTAMINATED")
-                    n_rechk = sum(1 for r in reports if r.get("status") == "RECHECK REQUIRED")
-                    n_safe = sum(1 for r in reports if r.get("status") == "SAFE")
-
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("SAFE", n_safe)
-                    m2.metric("CONT", n_cont)
-                    m3.metric("RECHECK", n_rechk)
-
-                    df = pd.DataFrame(reports)
-                    if not df.empty:
-                        df_show = df.copy()
-                        df_show["area"] = df_show["id"].astype(int) + 1
-                        cols = [c for c in ["area", "status", "phi", "cyan", "orange", "method"] if c in df_show.columns]
-                        st.dataframe(df_show[cols], use_container_width=True, height=220)
-
-                        # CSV download
-                        csv_bytes = df_show[cols].to_csv(index=False).encode("utf-8")
-                        st.download_button(
-                            "Download CSV",
-                            csv_bytes,
-                            file_name="tfcp_reports.csv",
-                            mime="text/csv",
-                            use_container_width=True
-                        )
-
-                    # Annotated image download (PNG)
-                    buf = io.BytesIO()
-                    Image.fromarray(st.session_state.last_result_img).save(buf, format="PNG")
-                    st.download_button(
-                        "Download annotated PNG",
-                        buf.getvalue(),
-                        file_name="tfcp_annotated.png",
-                        mime="image/png",
-                        use_container_width=True
-                    )
-                else:
-                    st.warning("No particles detected.")
-
 
 
