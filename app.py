@@ -290,7 +290,7 @@ def analyze_green_blue_conditions(
     min_v=40,
     min_g=60,
     green_dom_diff=30,
-    b_floor_percentile=15,
+    b_floor_percentile=30,
 ):
     """
     Returns quick global metrics used to decide whether to suppress blue cast.
@@ -1043,5 +1043,6 @@ elif mode == "Real-time Inference":
 
             with c2:
                 st.markdown("### Metrics")
+
 
 
