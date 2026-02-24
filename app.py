@@ -1,3 +1,4 @@
+import io
 import hashlib
 import streamlit as st
 import cv2
@@ -679,136 +680,193 @@ if mode == "Admin Console":
 
 elif mode == "Real-time Inference":
     st.markdown("<h1 class='header-text'>TFCP Inference Engine</h1>", unsafe_allow_html=True)
+
+    # --- Sidebar: settings (세련되게 컨트롤을 모아둠) ---
+    st.sidebar.markdown("### Inference Settings")
+    gamma = st.sidebar.slider("Gamma", 0.30, 2.00, 0.80, 0.05)
+    model_conf = st.sidebar.slider("YOLO conf", 0.05, 0.50, 0.10, 0.01)
+    model_iou = st.sidebar.slider("YOLO IoU", 0.10, 0.80, 0.45, 0.05)
+    max_side = st.sidebar.selectbox("Downscale max side", [800, 1024, 1280, 1600], index=2)
+
+    auto_run_on_new = st.sidebar.checkbox("Auto-run when new image arrives", value=True)
+    auto_save = st.sidebar.checkbox("Auto-save run to logs", value=True)
+    jpg_quality = st.sidebar.slider("Save JPG quality", 70, 100, 98, 1)
+
+    show_box_labels = st.sidebar.checkbox("Show box labels", value=True)
+    show_global_label = st.sidebar.checkbox("Show global label", value=False)
+
+    hq_display = st.sidebar.checkbox("HQ display (no standardize resize)", value=True)
+
     c1, c2 = st.columns([2, 1])
 
-    # --- [PERF] session_state: 같은 이미지면 재분석/재저장 방지 ---
+    # --- session_state init ---
     if "last_img_hash" not in st.session_state:
         st.session_state.last_img_hash = None
         st.session_state.last_proc_hash = None
-        st.session_state.last_proc_img = None
         st.session_state.last_orig_img = None
+        st.session_state.last_proc_img = None
         st.session_state.last_scale = 1.0
+
         st.session_state.last_result_img = None
         st.session_state.last_reports = None
+
         st.session_state.last_saved_id = None
+        st.session_state.last_saved_hash = None
 
     # --- Input UI ---
     with c1:
         img_file = st.camera_input("Acquire")
         if not img_file:
-            img_file = st.file_uploader("Upload", type=['jpg', 'png', 'jpeg'])
+            img_file = st.file_uploader("Upload", type=["jpg", "jpeg", "png"])
 
-    # --- Processing (only when img_file exists) ---
-    if img_file:
-        raw = img_file.getvalue()  # bytes
+    # --- If no input ---
+    if not img_file:
+        st.info("새 이미지를 업로드/촬영하면 분석할 수 있습니다.")
+    else:
+        raw = img_file.getvalue()
         img_hash = hashlib.sha1(raw).hexdigest()
 
-        # decode/resize는 이미지가 바뀔 때만 수행
+        # Decode + downscale only when input changes
         if img_hash != st.session_state.last_proc_hash:
             file_bytes = np.frombuffer(raw, dtype=np.uint8)
             image = cv2.imdecode(file_bytes, 1)
-
             if image is None:
                 st.error("Load Failed")
                 st.stop()
 
-            # 큰 이미지면 축소해서 처리(성능 핵심)
-            image_proc, scale = downscale_if_needed(image, max_side=1280)
+            image_proc, scale = downscale_if_needed(image, max_side=max_side)
 
-            # ✅ 원본/처리본 둘 다 session_state에 보관
             st.session_state.last_proc_hash = img_hash
-            st.session_state.last_orig_img = image          # <-- 추가
+            st.session_state.last_orig_img = image
             st.session_state.last_proc_img = image_proc
             st.session_state.last_scale = scale
         else:
-            image = st.session_state.last_orig_img          # <-- 추가
+            image = st.session_state.last_orig_img
             image_proc = st.session_state.last_proc_img
             scale = st.session_state.last_scale
 
-        rerun = st.button("🔄 Re-run Analysis", use_container_width=True)
+        # Run control
+        with c2:
+            run_btn = st.button("Run analysis", type="primary", use_container_width=True)
+            rerun_btn = st.button("Re-run (same image)", use_container_width=True)
 
-        if rerun or (img_hash != st.session_state.last_img_hash):
+        should_run = False
+        if rerun_btn:
+            should_run = True
+        elif run_btn:
+            should_run = True
+        elif auto_run_on_new and (img_hash != st.session_state.last_img_hash):
+            should_run = True
+
+        if should_run:
             with st.spinner("Analyzing..."):
-                res_img_rgb, reports = process_frame(image_proc)
+                # 분석은 downscaled 이미지로 (가벼움)
+                _, reports = process_frame(
+                    image_proc,
+                    gamma=gamma,
+                    model_conf=model_conf,
+                    model_iou=model_iou
+                )
 
-            st.session_state.last_img_hash = img_hash
-            st.session_state.last_result_img = res_img_rgb
-            st.session_state.last_reports = reports
-
-            now = datetime.now()
-            ts_id = now.strftime("%Y%m%d_%H%M%S_%f")
-            ts_display = now.strftime("%Y-%m-%d %H:%M:%S")
-            fn = f"TFCP_{ts_id}"
-
-             # ✅ reports를 원본 좌표로 변환
+            # reports를 원본 좌표로 복구
             inv_scale = 1.0 / float(scale if scale > 0 else 1.0)
             reports_up = rescale_reports(reports, inv_scale)
 
-            # ✅ 원본 저장 (선명도 유지)
-            cv2.imwrite(
-                os.path.join(IMG_DIR, f"{fn}.jpg"),
-                image,
-                [int(cv2.IMWRITE_JPEG_QUALITY), 98]  # 품질도 올림
+            # 표시 이미지는 원본 기반으로 다시 그려서 선명도 유지
+            img_corr_orig = apply_gamma_correction(image, gamma=gamma)
+            annotated_rgb = draw_smart_annotations(
+                img_corr_orig.copy(),
+                reports_up,
+                show_box_labels=show_box_labels,
+                show_global_label=show_global_label
             )
 
-            # ✅ JSON도 원본 좌표 기준으로 저장
-            with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
-                json.dump({
-                    "filename": f"{fn}.jpg",
-                    "timestamp": ts_display,
-                    "timestamp_id": ts_id,
-                    "reports": reports_up,          # <-- 원본 좌표
-                    "reviewed": False,
-                    "app_version": APP_VERSION,
-                    "gamma": 0.8,
-                    "input_scale": float(scale),
-                    "note": "Processed on downscaled image; saved original image and original-scale boxes."
-                }, f, indent=4)
-
-            # ✅ 표시용도 원본 기반으로 다시 그림
-            img_corr_orig = apply_gamma_correction(image, gamma=0.8)
-            res_img_rgb = draw_smart_annotations(img_corr_orig.copy(), reports_up)
-
-            st.session_state.last_saved_id = fn
-            st.session_state.last_result_img = res_img_rgb
+            st.session_state.last_img_hash = img_hash
+            st.session_state.last_result_img = annotated_rgb
             st.session_state.last_reports = reports_up
 
-            st.session_state.last_saved_id = fn
+            # 저장(같은 이미지에 대해 자동 저장 반복 방지)
+            if auto_save and (img_hash != st.session_state.last_saved_hash):
+                now = datetime.now()
+                ts_id = now.strftime("%Y%m%d_%H%M%S_%f")
+                ts_display = now.strftime("%Y-%m-%d %H:%M:%S")
+                fn = f"TFCP_{ts_id}"
 
-        # --- 결과 표시 (이미 계산된 결과 재사용) ---
+                cv2.imwrite(
+                    os.path.join(IMG_DIR, f"{fn}.jpg"),
+                    image,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), int(jpg_quality)]
+                )
+
+                with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
+                    json.dump({
+                        "filename": f"{fn}.jpg",
+                        "timestamp": ts_display,
+                        "timestamp_id": ts_id,
+                        "reports": reports_up,
+                        "reviewed": False,
+                        "app_version": APP_VERSION,
+                        "params": {
+                            "gamma": float(gamma),
+                            "model_conf": float(model_conf),
+                            "model_iou": float(model_iou),
+                            "downscale_max_side": int(max_side),
+                            "input_scale": float(scale)
+                        }
+                    }, f, indent=4)
+
+                st.session_state.last_saved_id = fn
+                st.session_state.last_saved_hash = img_hash
+
+        # --- Display ---
         if st.session_state.last_result_img is not None:
-            display_img = standardize_image_size(st.session_state.last_result_img, 1280, 960)
             with c1:
-                st.image(display_img, caption="Analysis Result", width=800)
+                if hq_display:
+                else:
+                    display_img = standardize_image_size(st.session_state.last_result_img, 1280, 960)
+                    st.image(display_img, caption="Analysis Result", width=800)
 
             reports = st.session_state.last_reports or []
+
             with c2:
                 st.markdown("### Metrics")
+
                 if reports:
-                    n_cont = sum(1 for r in reports if r.get('status') == "CONTAMINATED")
-                    n_rechk = sum(1 for r in reports if r.get('status') == "RECHECK REQUIRED")
-                    n_safe = sum(1 for r in reports if r.get('status') == "SAFE")
-                    st.markdown(f"- SAFE: **{n_safe}**  \n- CONT: **{n_cont}**  \n- RECHECK: **{n_rechk}**")
+                    n_cont = sum(1 for r in reports if r.get("status") == "CONTAMINATED")
+                    n_rechk = sum(1 for r in reports if r.get("status") == "RECHECK REQUIRED")
+                    n_safe = sum(1 for r in reports if r.get("status") == "SAFE")
 
-                    for r in reports:
-                        cls = "status-cont" if r['status'] == "CONTAMINATED" else "status-safe" if r['status'] == "SAFE" else "status-warn"
-                        st.markdown(f"""
-                        <div class="metric-card">
-                            <div><strong>Area {r['id'] + 1}</strong></div>
-                            <div class="{cls}">{r['status']}</div>
-                            <div style="font-size:0.85em; color:#666; margin-top:5px;">
-                                Φ: {r['phi']}<br>
-                                Cyan: {r['cyan']}%<br>
-                                Orange: {r['orange']}%
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("SAFE", n_safe)
+                    m2.metric("CONT", n_cont)
+                    m3.metric("RECHECK", n_rechk)
+
+                    df = pd.DataFrame(reports)
+                    if not df.empty:
+                        df_show = df.copy()
+                        df_show["area"] = df_show["id"].astype(int) + 1
+                        cols = [c for c in ["area", "status", "phi", "cyan", "orange", "method"] if c in df_show.columns]
+                        st.dataframe(df_show[cols], use_container_width=True, height=220)
+
+                        # CSV download
+                        csv_bytes = df_show[cols].to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            "Download CSV",
+                            csv_bytes,
+                            file_name="tfcp_reports.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+
+                    # Annotated image download (PNG)
+                    buf = io.BytesIO()
+                    Image.fromarray(st.session_state.last_result_img).save(buf, format="PNG")
+                    st.download_button(
+                        "Download annotated PNG",
+                        buf.getvalue(),
+                        file_name="tfcp_annotated.png",
+                        mime="image/png",
+                        use_container_width=True
+                    )
                 else:
-                    st.warning("No particles")
-    else:
-        st.info("새 이미지를 업로드/촬영하면 자동으로 분석합니다.")
-
-
-        
-
-
+                    st.warning("No particles detected.")
