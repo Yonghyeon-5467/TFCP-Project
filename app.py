@@ -957,8 +957,7 @@ elif mode == "Real-time Inference":
 
         if should_run:
             with st.spinner("Analyzing..."):
-                # 분석은 downscaled 이미지로 (가벼움)
-                _, reports = process_frame(
+                res_img_rgb, reports, pre = process_frame(
                     image_proc,
                     gamma=gamma,
                     model_conf=model_conf,
@@ -1074,5 +1073,6 @@ elif mode == "Real-time Inference":
                     )
                 else:
                     st.warning("No particles detected.")
+
 
 
