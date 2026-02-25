@@ -1209,6 +1209,44 @@ elif mode == "Real-time Inference":
                 )
                 st.session_state.last_pre = {}
 
+                reports = st.session_state.last_reports or []
+
+                # ---- Metrics debug line ----
+                pre = st.session_state.get("last_pre", {})
+                st.caption(
+                    f"blue_kill applied={pre.get('applied')} | "
+                    f"mode={pre.get('mode')} | "
+                    f"green_present={pre.get('green_present')} | "
+                    f"blue_cast={pre.get('blue_cast')}"
+                )
+
+                # ---- Summary + Table ----
+                if reports:
+                    n_cont = sum(1 for r in reports if r.get("status") == "CONTAMINATED")
+                    n_rechk = sum(1 for r in reports if r.get("status") == "RECHECK REQUIRED")
+                    n_safe = sum(1 for r in reports if r.get("status") == "SAFE")
+
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("SAFE", n_safe)
+                    m2.metric("CONT", n_cont)
+                    m3.metric("RECHECK", n_rechk)
+
+                    df = pd.DataFrame(reports).copy()
+                    if not df.empty:
+                        df["area"] = df["id"].astype(int) + 1
+                        cols = [c for c in ["area", "status", "phi", "cyan", "orange", "method", "signal_mode"] if c in df.columns]
+                        st.dataframe(df[cols], use_container_width=True, height=240)
+
+                        csv_bytes = df[cols].to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            "Download CSV",
+                            csv_bytes,
+                            file_name="tfcp_reports.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+                else:
+                    st.info("No report yet. Upload/capture an image and click Run analysis.")
 
 
 
