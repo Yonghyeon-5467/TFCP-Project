@@ -678,7 +678,7 @@ def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45, blue_kill_ena
 
     if blue_kill_enabled and (not green_present) and blue_cast:
         # 여기 파라미터가 "파란색 더 줄이기" 핵심 노브임
-        BLUEKILL_GAIN = 0.10        # ↓ 더 줄이면(0.10->0.05) blue 더 죽음
+        BLUEKILL_GAIN = 0.01        # ↓ 더 줄이면(0.10->0.05) blue 더 죽음
         BLUEKILL_STRENGTH = 1.0     # ↑ 올리면 더 죽음(1.0->1.2)
         BLUEKILL_CAP_DELTA = 5      # ↓ 줄이면 더 죽음(5->0)
 
@@ -1206,6 +1206,7 @@ elif mode == "Real-time Inference":
 
             with c2:
                 st.markdown("### Metrics")
+
 
 
 
