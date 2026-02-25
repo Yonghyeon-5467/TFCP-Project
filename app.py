@@ -538,59 +538,187 @@ def _box_to_xyxy_int(box):
         coords = np.array(box.xyxy[0]).flatten()
     x1, y1, x2, y2 = map(int, coords)
     return x1, y1, x2, y2
+def _resize_for_metrics(img_bgr, max_side=320):
+    h, w = img_bgr.shape[:2]
+    m = max(h, w)
+    if m <= max_side:
+        return img_bgr
+    scale = max_side / float(m)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    return cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-def process_frame(
-    img,
-    gamma=0.8,
-    model_conf=0.10,
-    model_iou=0.45,
-    # --- NEW: conditional blue suppression ---
-    blue_fix=True,
-    green_ratio_thr=0.002,
-    blue_dom90_thr=18.0,
-    b90_thr=140.0,
-    b_floor_percentile=15,
-    blue_cap_delta=25,
+
+def analyze_green_blue(
+    img_bgr,
+    sample_max_side=320,
+    min_v=40,
+    green_min=60,
+    green_dom_diff=30,
+    b_floor_percentile=15
 ):
     """
-    TFCP core analysis + (optional) conditional blue suppression.
+    목적:
+      - green 형광이 '의미있게' 존재하는지(=green-dominant 픽셀 비율) 추정
+      - blue cast가 강한지(blue dominance) 추정
+      - blue channel black point(b_floor) 추정
+    """
+    small = _resize_for_metrics(img_bgr, sample_max_side)
+    b, g, r = cv2.split(small.astype(np.int16))
 
-    Blue suppression is applied ONLY when:
-      - green-dominant pixels are almost absent
-      - blue cast/backlight is strong
+    v = np.maximum(np.maximum(b, g), r)
+    valid = v > min_v
+    valid_n = int(np.count_nonzero(valid))
+    if valid_n <= 0:
+        return {"valid_px": 0, "green_ratio": 0.0, "blue_dom90": 0.0, "b90": 0.0, "b_floor": 0.0}
 
-    Returns:
-      final_img_rgb, reports, preproc_meta
+    green_dom = (g > green_min) & ((g - np.maximum(b, r)) > green_dom_diff) & valid
+    green_ratio = float(np.count_nonzero(green_dom) / valid_n)
+
+    blue_over = b - np.maximum(g, r)
+    blue_dom90 = float(np.percentile(blue_over[valid], 90))
+    b90 = float(np.percentile(b[valid], 90))
+
+    b_floor = float(np.percentile(b[valid].astype(np.float32), b_floor_percentile))
+
+    return {
+        "valid_px": valid_n,
+        "green_ratio": green_ratio,
+        "blue_dom90": blue_dom90,
+        "b90": b90,
+        "b_floor": b_floor
+    }
+
+
+def apply_blue_kill(img_bgr, b_floor, gain=0.10, strength=1.0, cap_delta=5):
+    """
+    ImageJ에서 blue minimum 올리는 느낌(blue black point raise + 강한 감쇠)을 흉내.
+      B' = max(0, B - strength*b_floor) * gain
+      그리고 B' <= G + cap_delta 로 추가로 눌러버림
+
+    - gain을 더 작게(0.10 -> 0.05) 하면 blue가 더 '존나' 죽음
+    - cap_delta를 더 작게(5 -> 0) 하면 blue가 더 눌림
+    """
+    b, g, r = cv2.split(img_bgr.astype(np.float32))
+    b2 = np.maximum(0.0, b - float(b_floor) * float(strength)) * float(gain)
+    if cap_delta is not None:
+        b2 = np.minimum(b2, g + float(cap_delta))
+
+    out = cv2.merge([
+        np.clip(b2, 0, 255).astype(np.uint8),
+        np.clip(g, 0, 255).astype(np.uint8),
+        np.clip(r, 0, 255).astype(np.uint8),
+    ])
+    return out
+
+
+def make_green_signal_mask(roi_bgr, valid_u8, containment_u8, g_min=120, diff_min=40):
+    """
+    blue를 죽인 상태(blue-kill mode)에서, 'cyan(원래)'을 'green'으로 읽기 위한 마스크.
+    - green-dominant: G가 충분히 크고, (G - max(B,R))가 diff_min 이상
+    - valid_u8 + containment_u8 로 제한
+    """
+    b, g, r = cv2.split(roi_bgr.astype(np.int16))
+
+    green_dom = (g >= g_min) & ((g - np.maximum(b, r)) >= diff_min)
+    mask = (green_dom.astype(np.uint8) * 255)
+    mask = cv2.bitwise_and(mask, valid_u8)
+    mask = cv2.bitwise_and(mask, containment_u8)
+
+    # 노이즈 조금 정리
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+
+    # intensity map (0~100): green residual 느낌
+    green_res = np.clip(
+        g.astype(np.float32) - 0.5 * b.astype(np.float32) - 0.5 * r.astype(np.float32),
+        0.0, 255.0
+    )
+    intensity_map = np.clip(green_res / 2.55, 0.0, 100.0)
+
+    # 아주 강한(포화급) green 픽셀
+    sat = (g >= 230) & ((g - np.maximum(b, r)) >= 60)
+    sat_mask = (sat.astype(np.uint8) * 255)
+    sat_mask = cv2.bitwise_and(sat_mask, mask)
+    saturated_pixels = int(cv2.countNonZero(sat_mask))
+
+    return mask, intensity_map, saturated_pixels
+
+def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45, blue_kill_enabled=True):
+    """
+    반환:
+      final_img, reports, pre
     """
 
-    # 1) gamma correction
+    # 0) gamma 보정 (원본 기반)
     img_corr = apply_gamma_correction(img, gamma=gamma)
 
-    # 2) YOLO detection (keep model distribution as close as possible: gamma만 적용)
+    # 1) "green 형광이 없을 때만" blue kill 적용 여부 판단
+    #    (임계값은 여기 숫자만 조절하면 됨)
+    m = analyze_green_blue(img_corr, b_floor_percentile=15)
+
+    GREEN_RATIO_THR = 0.07     # green-dominant 픽셀 비율이 7% 이상이면 "green 형광 존재"로 취급
+    BLUE_DOM90_THR = 15        # blue dominance가 이 이상이면 blue cast 강함
+    B90_THR = 110              # blue 자체도 밝아야 함(그냥 파란 점 몇개 수준은 제외)
+
+    green_present = (m["green_ratio"] > GREEN_RATIO_THR)
+    blue_cast = (m["blue_dom90"] > BLUE_DOM90_THR) and (m["b90"] > B90_THR)
+
+    pre = {
+        "applied": False,
+        "mode": "HSV_CYAN",         # 기본 모드
+        "green_present": bool(green_present),
+        "blue_cast": bool(blue_cast),
+        "metrics": m,
+        "params": {}
+    }
+
+    # 2) 분석용 이미지 결정 (img_anl)
+    img_anl = img_corr
+
+    if blue_kill_enabled and (not green_present) and blue_cast:
+        # 여기 파라미터가 "파란색 더 줄이기" 핵심 노브임
+        BLUEKILL_GAIN = 0.10        # ↓ 더 줄이면(0.10->0.05) blue 더 죽음
+        BLUEKILL_STRENGTH = 1.0     # ↑ 올리면 더 죽음(1.0->1.2)
+        BLUEKILL_CAP_DELTA = 5      # ↓ 줄이면 더 죽음(5->0)
+
+        img_anl = apply_blue_kill(
+            img_corr,
+            b_floor=m["b_floor"],
+            gain=BLUEKILL_GAIN,
+            strength=BLUEKILL_STRENGTH,
+            cap_delta=BLUEKILL_CAP_DELTA
+        )
+        pre["applied"] = True
+        pre["mode"] = "GREEN_SIGNAL"
+        pre["params"] = {
+            "gain": BLUEKILL_GAIN,
+            "strength": BLUEKILL_STRENGTH,
+            "cap_delta": BLUEKILL_CAP_DELTA,
+            "b_floor": m["b_floor"]
+        }
+
+    # 3) HSV는 분석용 이미지(img_anl) 기준
+    hsv = cv2.cvtColor(img_anl, cv2.COLOR_BGR2HSV)
+    img_h, img_w = img_anl.shape[:2]
+
+    # 4) YOLO는 원본 gamma 보정(img_corr) 기준으로 추론 (모델 도메인 유지)
     ai_raw_boxes = []
     if model is not None:
         try:
-            results = model.predict(source=img_corr, conf=model_conf, iou=model_iou, imgsz=640, verbose=False)
+            results = model.predict(
+                source=img_corr,
+                conf=model_conf,
+                iou=model_iou,
+                imgsz=640,
+                verbose=False
+            )
             ai_raw_boxes = filter_nested_boxes(results[0].boxes)
         except Exception:
             ai_raw_boxes = []
 
-    # 3) NEW: conditional blue suppression for HSV/intensity analysis
-    img_anl, pre = conditional_blue_suppression(
-        img_corr,
-        enabled=blue_fix,
-        green_ratio_thr=green_ratio_thr,
-        blue_dom90_thr=blue_dom90_thr,
-        b90_thr=b90_thr,
-        b_floor_percentile=b_floor_percentile,
-        cap_delta=blue_cap_delta,
-    )
-
-    hsv = cv2.cvtColor(img_anl, cv2.COLOR_BGR2HSV)
-    img_h, img_w = img_anl.shape[:2]
-
-    # 4) validate boxes using corrected HSV
     combined_boxes = []
+
     ORANGE_LO = np.array([0, 35, 35])
     ORANGE_HI = np.array([60, 255, 255])
     CYAN_LO = np.array([80, 30, 30])
@@ -601,22 +729,27 @@ def process_frame(
         if (x2 - x1) < 50 or (y2 - y1) < 50:
             continue
 
+        if pre["mode"] == "GREEN_SIGNAL":
+            # blue-kill 모드에서는 "색 필터로 박스를 버리면" 놓치기 쉬움 → YOLO 박스를 그대로 사용
+            combined_boxes.append((box, "AI"))
+            continue
+
         roi_hsv = hsv[max(0, y1):min(img_h, y2), max(0, x1):min(img_w, x2)]
         if roi_hsv.size == 0:
             continue
 
         mask_o = cv2.inRange(roi_hsv, ORANGE_LO, ORANGE_HI)
         mask_c = cv2.inRange(roi_hsv, CYAN_LO, CYAN_HI)
-        color_px = cv2.countNonZero(mask_o) + cv2.countNonZero(mask_c)
+        color_px = int(cv2.countNonZero(mask_o)) + int(cv2.countNonZero(mask_c))
 
         if color_px > 200:
             combined_boxes.append((box, "AI"))
 
+    # YOLO 박스가 없으면 fallback
     if not combined_boxes:
         for cv_box in detect_particles_heuristically(img_anl):
             combined_boxes.append((cv_box, "CV_BACKUP"))
 
-    # 5) ROI analysis
     reports = []
 
     MIN_BODY_PX = 120
@@ -640,9 +773,14 @@ def process_frame(
         valid_mask = (roi_hsv[:, :, 1] > 25) & (roi_hsv[:, :, 2] > 25)
         valid_u8 = (valid_mask.astype(np.uint8) * 255)
 
+        # orange body
         mask_orange = cv2.inRange(roi_hsv, np.array([0, 30, 30]), np.array([60, 255, 255]))
         mask_orange_valid = cv2.bitwise_and(mask_orange, valid_u8)
-        mask_orange_closed = cv2.morphologyEx(mask_orange_valid, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        mask_orange_closed = cv2.morphologyEx(
+            mask_orange_valid,
+            cv2.MORPH_CLOSE,
+            np.ones((5, 5), np.uint8)
+        )
 
         contours, _ = cv2.findContours(mask_orange_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -659,54 +797,79 @@ def process_frame(
         if body_area_px < MIN_BODY_PX or orange_area_pct < MIN_ORANGE_PCT:
             status = "RECHECK REQUIRED"
             phi = 0.0
-            cyan_area = 0.0
+            signal_area = 0.0
             avg_int = 0.0
         else:
             mask_containment_zone = cv2.dilate(mask_particle_body, np.ones((3, 3), np.uint8), iterations=1)
 
-            mask_cyan_candidate = cv2.inRange(roi_hsv, CYAN_LO, CYAN_HI)
-            mask_cyan_candidate = cv2.bitwise_and(mask_cyan_candidate, valid_u8)
-            mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
+            if pre["mode"] == "GREEN_SIGNAL":
+                # === 핵심: blue kill 이후 cyan을 green으로 읽음 ===
+                GREEN_GMIN = 120     # 너무 빡세면 110/100으로 낮춰
+                GREEN_DIFF = 40      # 너무 빡세면 35/30으로 낮춰
 
-            b_ch, g_ch, r_ch = cv2.split(roi_img.astype(np.float32))
-            is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
-            is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
-
-            mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255)
-            mask_saturated_valid = cv2.bitwise_and(mask_saturated_valid, mask_containment_zone)
-            saturated_pixels = int(cv2.countNonZero(mask_saturated_valid))
-
-            intensity_raw = np.where(
-                is_glare, 0.0,
-                np.where(
-                    is_saturated_cyan,
-                    ((g_ch + b_ch) / 2.0 - r_ch * 0.8),
-                    ((g_ch + b_ch) / 2.0 - r_ch * 1.7)
+                mask_sig, intensity_map, saturated_pixels = make_green_signal_mask(
+                    roi_img,
+                    valid_u8,
+                    mask_containment_zone,
+                    g_min=GREEN_GMIN,
+                    diff_min=GREEN_DIFF
                 )
-            )
-            intensity_map = np.clip(intensity_raw, 0.0, 100.0)
 
-            cyan_px = int(cv2.countNonZero(mask_cyan))
-            cyan_area = (cyan_px / body_area_px) * 100.0 if body_area_px > 0 else 0.0
-            avg_int = float(np.mean(intensity_map[mask_cyan > 0])) if cyan_px > 0 else 0.0
+                sig_px = int(cv2.countNonZero(mask_sig))
+                signal_area = (sig_px / body_area_px) * 100.0 if body_area_px > 0 else 0.0
+                avg_int = float(np.mean(intensity_map[mask_sig > 0])) if sig_px > 0 else 0.0
 
-            phi = cyan_area * (avg_int / 10.0)
+                phi = signal_area * (avg_int / 10.0)
 
-            status = "CONTAMINATED" if (phi > 5.0 or saturated_pixels > 20) else "SAFE"
-            if status == "CONTAMINATED" and phi < 5.0:
-                phi = 99.9
+                status = "CONTAMINATED" if (phi > 5.0 or saturated_pixels > 20) else "SAFE"
+                if status == "CONTAMINATED" and phi < 5.0:
+                    phi = 99.9
+
+            else:
+                # === 기존 HSV cyan 로직 ===
+                mask_cyan_candidate = cv2.inRange(roi_hsv, CYAN_LO, CYAN_HI)
+                mask_cyan_candidate = cv2.bitwise_and(mask_cyan_candidate, valid_u8)
+                mask_cyan = cv2.bitwise_and(mask_cyan_candidate, mask_containment_zone)
+
+                b_ch, g_ch, r_ch = cv2.split(roi_img.astype(np.float32))
+                is_glare = (g_ch > 200) & (b_ch > 200) & (r_ch > 200)
+                is_saturated_cyan = (g_ch > 200) & (b_ch > 200) & (r_ch < 200)
+
+                mask_saturated_valid = (is_saturated_cyan.astype(np.uint8) * 255)
+                mask_saturated_valid = cv2.bitwise_and(mask_saturated_valid, mask_containment_zone)
+                saturated_pixels = int(cv2.countNonZero(mask_saturated_valid))
+
+                intensity_raw = np.where(
+                    is_glare, 0.0,
+                    np.where(
+                        is_saturated_cyan,
+                        ((g_ch + b_ch) / 2.0 - r_ch * 0.8),
+                        ((g_ch + b_ch) / 2.0 - r_ch * 1.7)
+                    )
+                )
+                intensity_map = np.clip(intensity_raw, 0.0, 100.0)
+
+                cyan_px = int(cv2.countNonZero(mask_cyan))
+                signal_area = (cyan_px / body_area_px) * 100.0 if body_area_px > 0 else 0.0
+                avg_int = float(np.mean(intensity_map[mask_cyan > 0])) if cyan_px > 0 else 0.0
+
+                phi = signal_area * (avg_int / 10.0)
+
+                status = "CONTAMINATED" if (phi > 5.0 or saturated_pixels > 20) else "SAFE"
+                if status == "CONTAMINATED" and phi < 5.0:
+                    phi = 99.9
 
         reports.append({
             "id": i,
             "status": status,
             "phi": float(round(phi, 2)),
-            "cyan": float(round(cyan_area, 2)),
+            "cyan": float(round(signal_area, 2)),  # GREEN_SIGNAL 모드에서도 지표 필드명 유지
             "orange": float(round(orange_area_pct, 2)),
             "box": [int(nx1), int(ny1), int(nx2), int(ny2)],
             "method": method,
+            "signal_mode": pre["mode"],            # 디버그/추적용
         })
 
-    # 6) draw on analyzed image (gamma + maybe blue fix)
     final_img = draw_smart_annotations(img_anl.copy(), reports)
     return final_img, reports, pre
     
@@ -1043,6 +1206,7 @@ elif mode == "Real-time Inference":
 
             with c2:
                 st.markdown("### Metrics")
+
 
 
 
