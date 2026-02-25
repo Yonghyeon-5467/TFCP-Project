@@ -1126,7 +1126,8 @@ elif mode == "Real-time Inference":
                     model_conf=model_conf,
                     model_iou=model_iou
                 )
-
+            st.session_state.last_pre = pre
+            
             # reports를 원본 좌표로 복구
             inv_scale = 1.0 / float(scale if scale > 0 else 1.0)
             reports_up = rescale_reports(reports, inv_scale)
@@ -1199,7 +1200,14 @@ elif mode == "Real-time Inference":
 
             with c2:
                 st.markdown("### Metrics")
-                st.caption(f"blue_kill applied={pre.get('applied')} | mode={pre.get('mode')} | green_present={pre.get('green_present')} | blue_cast={pre.get('blue_cast')}")
+                pre = st.session_state.get("last_pre", {})
+                st.caption(
+                    f"blue_kill applied={pre.get('applied')} | "
+                    f"mode={pre.get('mode')} | "
+                    f"green_present={pre.get('green_present')} | "
+                    f"blue_cast={pre.get('blue_cast')}"
+                )
+                st.session_state.last_pre = {}
 
 
 
