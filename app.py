@@ -1131,19 +1131,12 @@ elif mode == "Real-time Inference":
             inv_scale = 1.0 / float(scale if scale > 0 else 1.0)
             reports_up = rescale_reports(reports, inv_scale)
 
-            # 표시 이미지는 원본 기반으로 다시 그려서 선명도 유지
-            img_corr_orig = apply_gamma_correction(image, gamma=gamma)
-            annotated_rgb = draw_smart_annotations(
-                img_corr_orig.copy(),
-                reports_up,
-                show_box_labels=show_box_labels,
-                show_global_label=show_global_label
-            )
-
             st.session_state.last_img_hash = img_hash
-            st.session_state.last_result_img = annotated_rgb
+            
+            # ✅ process_frame이 만든 최종 이미지(blue-kill 포함)를 그대로 보여준다
+            st.session_state.last_result_img = res_img_rgb
             st.session_state.last_reports = reports_up
-
+            
             # 저장(같은 이미지에 대해 자동 저장 반복 방지)
             if auto_save and (img_hash != st.session_state.last_saved_hash):
                 now = datetime.now()
@@ -1177,7 +1170,7 @@ elif mode == "Real-time Inference":
                 st.session_state.last_saved_id = fn
                 st.session_state.last_saved_hash = img_hash
 
-              # --- Display ---
+        # --- Display ---
         if (st.session_state.last_result_img is not None) and (st.session_state.last_orig_img is not None):
             with c1:
                 view_mode = st.radio(
@@ -1206,7 +1199,7 @@ elif mode == "Real-time Inference":
 
             with c2:
                 st.markdown("### Metrics")
-
+                st.caption(f"blue_kill applied={pre.get('applied')} | mode={pre.get('mode')} | green_present={pre.get('green_present')} | blue_cast={pre.get('blue_cast')}")
 
 
 
