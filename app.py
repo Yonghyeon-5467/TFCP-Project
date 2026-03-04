@@ -61,7 +61,6 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 APP_VERSION = "10.2.2"  # 내부 로직/로그 버전 태그
 
-@st.cache_resource
 def load_model():
     if os.path.exists('best.pt'):
         try:
@@ -1262,6 +1261,7 @@ elif mode == "Real-time Inference":
                         )
                 else:
                     st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
 
 
