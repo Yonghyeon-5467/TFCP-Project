@@ -231,7 +231,7 @@ def draw_smart_annotations(
     line_w = max(2, int(4 * base * label_scale))
 
     # 폰트 설정 (OpenCV 내장)
-    font = cv2.FONT_HERSHEY_SIMPLEX
+    font = CV2.FONT_HERSHEY_SIMPLEX
     font_scale = max(0.7, 1.1 * base) * label_scale
     text_thick = max(2, int(2 * base * label_scale))
     pad = max(6, int(10 * base * label_scale))
@@ -252,7 +252,7 @@ def draw_smart_annotations(
         return "Safe"
 
     def text_box_size(text: str):
-        (tw, th), baseline = cv2.getTextSize(text, font, font_scale, text_thick)
+        (tw, th), baseline = CV2.getTextSize(text, font, font_scale, text_thick)
         bw = tw + 2 * pad
         bh = th + 2 * pad + baseline
         return bw, bh, th
@@ -265,13 +265,13 @@ def draw_smart_annotations(
         y = int(max(0, min(y, h - bh - 1)))
 
         # 라벨 배경(검정)
-        cv2.rectangle(img, (x, y), (x + bw, y + bh), (0, 0, 0), thickness=-1)
+        CV2.rectangle(img, (x, y), (x + bw, y + bh), (0, 0, 0), thickness=-1)
 
         # 라벨 테두리(상태색) - 원하면 주석 해제
-        cv2.rectangle(img, (x, y), (x + bw, y + bh), col_bgr, thickness=max(1, int(1 * base * label_scale)))
+        CV2.rectangle(img, (x, y), (x + bw, y + bh), col_bgr, thickness=max(1, int(1 * base * label_scale)))
 
         # 텍스트
-        cv2.putText(
+        CV2.putText(
             img,
             text,
             (x + pad, y + pad + th),
@@ -279,7 +279,7 @@ def draw_smart_annotations(
             font_scale,
             col_bgr,
             text_thick,
-            cv2.LINE_AA,
+            CV2.LINE_AA,
         )
 
         return bw, bh
@@ -336,7 +336,7 @@ def draw_smart_annotations(
             draw_label(x1, ly, txt, col)
 
     # ✅ streamlit에 바로 올리기 위해 RGB로 변환해서 반환
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return CV2.cvtColor(img, CV2.COLOR_BGR2RGB)
 
 # ============================================================
 # 8) Image utilities
@@ -1275,4 +1275,5 @@ else:
                 )
             else:
                 st.info("No report yet. Click Run analysis.")
+
 
