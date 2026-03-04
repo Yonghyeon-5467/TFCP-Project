@@ -1,14 +1,8 @@
 streamlit==1.39.0
 numpy<2
 pillow
-opencv-python-headless==4.11.0.86
-
+pandas
 torch
 torchvision
-
---no-deps ultralytics==8.4.19
-pyyaml
-matplotlib
-requests
-tqdm
-scipy
+ultralytics==8.4.19
+opencv-python-headless==4.11.0.86
