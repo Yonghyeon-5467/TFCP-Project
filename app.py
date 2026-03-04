@@ -206,43 +206,43 @@ def _load_font(size: int, bold: bool):
 # 7) Visualization: draw boxes & labels
 # ============================================================
 def draw_smart_annotations(
-    img_bgr: np.ndarray,
-    reports: list,
-    *,
-    show_box_labels: bool = True,
-    show_global_label: bool = False,
-    label_scale: float = 1.0,
-) -> np.ndarray:
+    img_bgr,
+    reports,
+    show_box_labels=True,
+    show_global_label=False,
+    label_scale=1.8,   # ✅ 여기 숫자 올리면 글자/라벨/선 다 커짐 (ex: 2.2)
+):
     """
-    Input: BGR image
-    Output: RGB image (np.uint8)
+    OpenCV 기본 폰트로 박스/라벨을 그립니다.
+    - PIL truetype 폰트가 없어도 글자 크기 확실히 커짐
+    - 반환은 RGB (streamlit st.image에 바로 넣을 수 있게)
     """
+
     if img_bgr is None:
         return None
 
-    h, w = img_bgr.shape[:2]
+    img = img_bgr.copy()
+    h, w = img.shape[:2]
 
-    img_rgb = CV2.cvtColor(img_bgr, CV2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(img_rgb).convert("RGBA")
-    overlay = Image.new("RGBA", pil_img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+    # 이미지 크기에 따른 자동 스케일
+    base = max(w, h) / 1200.0
 
-    base_scale = max(w, h) / 1200.0
-    base_scale = max(0.6, min(base_scale, 2.8))
-    base_scale *= float(label_scale)
+    # 박스 선 굵기
+    line_w = max(2, int(4 * base * label_scale))
 
-    line_width = max(2, int(4 * base_scale))
-    font_size = max(28, int(44 * base_scale))
-    pad = max(6, int(10 * base_scale))
+    # 폰트 설정 (OpenCV 내장)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.7, 1.1 * base) * label_scale
+    text_thick = max(2, int(2 * base * label_scale))
+    pad = max(6, int(10 * base * label_scale))
 
-    font = _load_font(font_size, bold=False)
-
-    def status_color(status: str):
+    def status_color_bgr(status: str):
+        # OpenCV는 BGR
         if status == "CONTAMINATED":
-            return (220, 53, 69)
+            return (69, 53, 220)    # 빨강(BGR)
         if status == "RECHECK REQUIRED":
-            return (253, 126, 20)
-        return (40, 167, 69)
+            return (20, 126, 253)   # 주황(BGR)
+        return (69, 167, 40)        # 초록(BGR)
 
     def status_text(status: str):
         if status == "CONTAMINATED":
@@ -251,26 +251,40 @@ def draw_smart_annotations(
             return "Recheck"
         return "Safe"
 
-    def measure_text(text: str):
-        try:
-            bbox = font.getbbox(text)
-            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        except Exception:
-            tw, th = draw.textsize(text, font=font)
-        return int(tw), int(th)
+    def text_box_size(text: str):
+        (tw, th), baseline = cv2.getTextSize(text, font, font_scale, text_thick)
+        bw = tw + 2 * pad
+        bh = th + 2 * pad + baseline
+        return bw, bh, th
 
-    def draw_label(x: int, y: int, text: str, fg_rgb: tuple):
-        bg_rgba = (0, 0, 0, 220)
+    def draw_label(x, y, text, col_bgr):
+        bw, bh, th = text_box_size(text)
 
-        tw, th = measure_text(text)
-        bw, bh = tw + 2 * pad, th + 2 * pad
+        # 화면 밖으로 나가지 않게 clamp
+        x = int(max(0, min(x, w - bw - 1)))
+        y = int(max(0, min(y, h - bh - 1)))
 
-        x = max(0, min(x, w - bw - 1))
-        y = max(0, min(y, h - bh - 1))
+        # 라벨 배경(검정)
+        cv2.rectangle(img, (x, y), (x + bw, y + bh), (0, 0, 0), thickness=-1)
 
-        draw.rectangle([x, y, x + bw, y + bh], fill=bg_rgba)
-        draw.text((x + pad, y + pad), text, font=font, fill=fg_rgb + (255,))
+        # 라벨 테두리(상태색) - 원하면 주석 해제
+        cv2.rectangle(img, (x, y), (x + bw, y + bh), col_bgr, thickness=max(1, int(1 * base * label_scale)))
 
+        # 텍스트
+        cv2.putText(
+            img,
+            text,
+            (x + pad, y + pad + th),
+            font,
+            font_scale,
+            col_bgr,
+            text_thick,
+            cv2.LINE_AA,
+        )
+
+        return bw, bh
+
+    # 전체 라벨(좌상단 1개) 옵션
     if show_global_label and reports:
         overall = "SAFE"
         for r in reports:
@@ -278,20 +292,25 @@ def draw_smart_annotations(
             if s == "CONTAMINATED":
                 overall = "CONTAMINATED"
                 break
-            if s == "RECHECK REQUIRED":
+            elif s == "RECHECK REQUIRED":
                 overall = "RECHECK REQUIRED"
-        draw_label(8, 8, status_text(overall), status_color(overall))
+        draw_label(8, 8, status_text(overall), status_color_bgr(overall))
 
+    # contaminated가 마지막에 오도록(겹칠 때 위에 보이게)
     def priority(r):
         s = r.get("status", "SAFE")
         return 2 if s == "CONTAMINATED" else 1 if s == "RECHECK REQUIRED" else 0
 
-    for r in sorted(reports or [], key=priority):
-        box = r.get("box")
+    reports_sorted = sorted(reports or [], key=priority)
+
+    for r in reports_sorted:
+        box = r.get("box", None)
         if not box or len(box) != 4:
             continue
 
         x1, y1, x2, y2 = map(int, box)
+
+        # clamp
         x1 = max(0, min(x1, w - 1))
         x2 = max(0, min(x2, w - 1))
         y1 = max(0, min(y1, h - 1))
@@ -300,24 +319,24 @@ def draw_smart_annotations(
             continue
 
         status = r.get("status", "SAFE")
-        col = status_color(status)
+        col = status_color_bgr(status)
 
-        draw.rectangle([x1, y1, x2, y2], outline=col + (255,), width=line_width)
+        # 박스
+        cv2.rectangle(img, (x1, y1), (x2, y2), col, thickness=line_w)
 
+        # 박스 라벨
         if show_box_labels:
             txt = status_text(status)
-            _, th = measure_text(txt)
-            label_h = th + 2 * pad
+            bw, bh, _ = text_box_size(txt)
 
-            ly = y1 - label_h
+            ly = y1 - bh
             if ly < 0:
                 ly = y1 + 2
 
             draw_label(x1, ly, txt, col)
 
-    out = Image.alpha_composite(pil_img, overlay)
-    return np.array(out.convert("RGB"), dtype=np.uint8)
-
+    # ✅ streamlit에 바로 올리기 위해 RGB로 변환해서 반환
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 # ============================================================
 # 8) Image utilities
@@ -1256,3 +1275,4 @@ else:
                 )
             else:
                 st.info("No report yet. Click Run analysis.")
+
