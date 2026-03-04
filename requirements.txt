@@ -1,6 +1,11 @@
 streamlit==1.39.0
-opencv-python-headless
-ultralytics
 numpy<2
 pillow
-torch
+opencv-python-headless
+
+# CPU-only torch 강제
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1+cpu
+torchvision==0.18.1+cpu
+
+ultralytics
