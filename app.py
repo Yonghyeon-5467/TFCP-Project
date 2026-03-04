@@ -11,6 +11,7 @@ import shutil
 from datetime import datetime
 import pandas as pd
 
+st.set_page_config(page_title="TFCP Quantitative Analysis System", page_icon="🔬", layout="wide")
 # torch는 ultralytics가 내부적으로 사용합니다.
 # (기존 코드에서는 fallback에서 매번 import해서 오버헤드가 있었음)
 try:
@@ -33,7 +34,7 @@ if _TORCH_OK:
 # --- [1] Page Config & CSS ---
 st.write("✅ app.py reached UI bootstrap")
 st.write("import stage passed")
-st.set_page_config(page_title="TFCP Quantitative Analysis System", page_icon="🔬", layout="wide")
+
 
 st.markdown("""
     <style>
@@ -1249,6 +1250,7 @@ elif mode == "Real-time Inference":
                         )
                 else:
                     st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
 
 
