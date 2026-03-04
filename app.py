@@ -1189,12 +1189,19 @@ elif mode == "Real-time Inference":
                 if view_mode == "Compare (Original vs Result)":
                     lc, rc = st.columns(2)
                     with lc:
-                        
-                        # 원본 위에도 동일 reports를 그려서 표시 (색 보정 없이 원본 위에 얹음)
-                        orig_annot = draw_smart_annotations(st.session_state.last_orig_img.copy(), st.session_state.last_reports)
-                        
-                        orig_annot_rgb = cv2.cvtColor(orig_annot, cv2.COLOR_BGR2RGB)  # draw_smart_annotations는 RGB 반환인데, 안전하게 맞춤
-                        st.image(orig_annot_rgb, caption="Original (annotated)", use_column_width=True)
+                        # 원본(BGR) -> RGB로 변환해서 표시
+                        orig_rgb = cv2.cvtColor(st.session_state.last_orig_img, cv2.COLOR_BGR2RGB)
+                        st.image(orig_rgb, caption="Original", use_column_width=True)
+                    
+                        # ✅ 원본 위에 박스/라벨만 얹은 버전(색 안 깨짐)
+                        orig_overlay_rgb = draw_smart_annotations(
+                            st.session_state.last_orig_img.copy(),   # 입력은 BGR
+                            st.session_state.last_reports            # reports는 원본 좌표
+                        )
+                        # draw_smart_annotations 출력은 이미 RGB라서 cvtColor 하면 안 됨!
+                        st.image(orig_overlay_rgb, caption="Original (annotated)", use_column_width=True)
+                                        
+            
                     with rc:
                         st.image(st.session_state.last_result_img, caption="Result (processed/annotated)", use_column_width=True)
 
@@ -1255,6 +1262,7 @@ elif mode == "Real-time Inference":
                         )
                 else:
                     st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
 
 
