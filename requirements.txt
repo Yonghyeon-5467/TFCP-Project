@@ -1,11 +1,10 @@
 streamlit==1.39.0
 numpy<2
 pillow
-opencv-python-headless
 
-# CPU-only torch 강제
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.3.1+cpu
-torchvision==0.18.1+cpu
-
+# torch는 python 3.11에서만 안정적으로 맞음(너 지금 3.11이라 OK)
+torch
 ultralytics
+
+# ✅ 맨 마지막에 headless를 "핀" 해서 최종 cv2를 headless로 덮어쓰기
+opencv-python-headless==4.11.0.86
