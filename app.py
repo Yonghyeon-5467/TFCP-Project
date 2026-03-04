@@ -133,7 +133,7 @@ def draw_smart_annotations(img_bgr, reports, show_box_labels=True, show_global_l
     # 스케일 (작은 이미지에서도 너무 작아지지 않게)
     scale = max(w, h) / 1200.0
     line_width = max(2, int(4 * scale))
-    font_size = max(26, int(34 * scale))
+    font_size = max(50, int(34 * scale))
     pad = max(8, int(10 * scale))
 
     font = get_custom_font(font_size, bold=False)
@@ -1262,6 +1262,7 @@ elif mode == "Real-time Inference":
                         )
                 else:
                     st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
 
 
