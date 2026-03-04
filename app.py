@@ -19,6 +19,10 @@ from datetime import datetime
 import pandas as pd
 
 st.set_page_config(page_title="TFCP Quantitative Analysis System", page_icon="🔬", layout="wide")
+if CV2_IMPORT_ERROR is not None:
+    st.error("❌ OpenCV(cv2) import failed")
+    st.code(repr(CV2_IMPORT_ERROR))
+    st.stop()
 # torch는 ultralytics가 내부적으로 사용합니다.
 # (기존 코드에서는 fallback에서 매번 import해서 오버헤드가 있었음)
 try:
@@ -1268,6 +1272,7 @@ elif mode == "Real-time Inference":
                         )
                 else:
                     st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
 
 
