@@ -16,22 +16,6 @@ def get_custom_font(size=40, bold=False):
 
 # --- [3] Visualization Helper (Server-Native Font) ---
 
-def get_custom_font(size=40, bold=False):
-    local_candidates = [
-        "fonts/LiberationSans-Bold.ttf" if bold else "fonts/LiberationSans-Regular.ttf",
-    ]
-    system_candidates = [
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]
-    for p in local_candidates + system_candidates:
-        if os.path.exists(p):
-            try:
-                return ImageFont.truetype(p, size)
-            except Exception:
-                pass
-    return ImageFont.load_default()
-
 def draw_smart_annotations(img_bgr, reports, show_box_labels=True, show_global_label=False):
     """
     - Arial 유사(Liberation Sans) 폰트 사용
@@ -1173,3 +1157,4 @@ elif mode == "Real-time Inference":
                     )
             else:
                 st.info("No report yet. Upload/capture an image and click Run analysis.")
+
