@@ -964,7 +964,7 @@ if mode == "Admin Console":
 elif mode == "Real-time Inference":
     st.markdown("<h1 class='header-text'>TFCP Inference Engine</h1>", unsafe_allow_html=True)
 
-    # --- Sidebar: settings (세련되게 컨트롤을 모아둠) ---
+    # Sidebar controls
     st.sidebar.markdown("### Inference Settings")
     gamma = st.sidebar.slider("Gamma", 0.30, 2.00, 0.80, 0.05)
     model_conf = st.sidebar.slider("YOLO conf", 0.05, 0.50, 0.10, 0.01)
@@ -978,11 +978,9 @@ elif mode == "Real-time Inference":
     show_box_labels = st.sidebar.checkbox("Show box labels", value=True)
     show_global_label = st.sidebar.checkbox("Show global label", value=False)
 
-    hq_display = st.sidebar.checkbox("HQ display (no standardize resize)", value=True)
-
     c1, c2 = st.columns([2, 1])
 
-    # --- session_state init ---
+    # Session init
     if "last_img_hash" not in st.session_state:
         st.session_state.last_img_hash = None
         st.session_state.last_proc_hash = None
@@ -992,212 +990,186 @@ elif mode == "Real-time Inference":
 
         st.session_state.last_result_img = None
         st.session_state.last_reports = None
+        st.session_state.last_pre = {}
 
         st.session_state.last_saved_id = None
         st.session_state.last_saved_hash = None
 
-    # --- Input UI ---
+        st.session_state.yolo_model = None
+
+    # Input UI
     with c1:
         img_file = st.camera_input("Acquire")
         if not img_file:
             img_file = st.file_uploader("Upload", type=["jpg", "jpeg", "png"])
 
-    # --- If no input ---
     if not img_file:
         st.info("새 이미지를 업로드/촬영하면 분석할 수 있습니다.")
+        st.stop()
+
+    raw = img_file.getvalue()
+    img_hash = hashlib.sha1(raw).hexdigest()
+
+    # Decode + downscale only when input changes
+    if img_hash != st.session_state.last_proc_hash:
+        file_bytes = np.frombuffer(raw, dtype=np.uint8)
+        image = cv2.imdecode(file_bytes, 1)
+        if image is None:
+            st.error("Load Failed")
+            st.stop()
+
+        # downscale for analysis
+        image_proc, scale = downscale_if_needed(image, max_side=max_side)
+
+        st.session_state.last_proc_hash = img_hash
+        st.session_state.last_orig_img = image
+        st.session_state.last_proc_img = image_proc
+        st.session_state.last_scale = scale
     else:
-        raw = img_file.getvalue()
-        img_hash = hashlib.sha1(raw).hexdigest()
+        image = st.session_state.last_orig_img
+        image_proc = st.session_state.last_proc_img
+        scale = st.session_state.last_scale
 
-        # Decode + downscale only when input changes
-        if img_hash != st.session_state.last_proc_hash:
-            file_bytes = np.frombuffer(raw, dtype=np.uint8)
-            image = cv2.imdecode(file_bytes, 1)
-            if image is None:
-                st.error("Load Failed")
-                st.stop()
+    # Run buttons
+    with c2:
+        run_btn = st.button("Run analysis", type="primary", use_container_width=True)
+        rerun_btn = st.button("Re-run (same image)", use_container_width=True)
 
-            image_proc, scale = downscale_if_needed(image, max_side=max_side)
+    should_run = False
+    if rerun_btn:
+        should_run = True
+    elif run_btn:
+        should_run = True
+    elif auto_run_on_new and (img_hash != st.session_state.last_img_hash):
+        should_run = True
 
-            st.session_state.last_proc_hash = img_hash
-            st.session_state.last_orig_img = image
-            st.session_state.last_proc_img = image_proc
-            st.session_state.last_scale = scale
-        else:
-            image = st.session_state.last_orig_img
-            image_proc = st.session_state.last_proc_img
-            scale = st.session_state.last_scale
+    if should_run:
+        # ✅ Load YOLO only when needed
+        if st.session_state.yolo_model is None:
+            st.session_state.yolo_model = load_model()
 
-        # Run control
-        with c2:
-            run_btn = st.button("Run analysis", type="primary", use_container_width=True)
-            rerun_btn = st.button("Re-run (same image)", use_container_width=True)
+        model = st.session_state.yolo_model
 
-        should_run = False
-        if rerun_btn:
-            should_run = True
-        elif run_btn:
-            should_run = True
-        elif auto_run_on_new and (img_hash != st.session_state.last_img_hash):
-            should_run = True
+        with st.spinner("Analyzing..."):
+            # IMPORTANT: your process_frame should accept model as an argument
+            res_img_rgb, reports, pre = process_frame(
+                image_proc,
+                gamma=gamma,
+                model_conf=model_conf,
+                model_iou=model_iou,
+                model=model
+            )
 
-        if should_run:
-            with st.spinner("Analyzing..."):
-                res_img_rgb, reports, pre = process_frame(
-                    image_proc,
-                    gamma=gamma,
-                    model_conf=model_conf,
-                    model_iou=model_iou
-                )
-            st.session_state.last_pre = pre
-            
-            # reports를 원본 좌표로 복구
-            inv_scale = 1.0 / float(scale if scale > 0 else 1.0)
-            reports_up = rescale_reports(reports, inv_scale)
+        st.session_state.last_img_hash = img_hash
+        st.session_state.last_pre = pre
 
-            st.session_state.last_img_hash = img_hash
-            
-            # ✅ process_frame이 만든 최종 이미지(blue-kill 포함)를 그대로 보여준다
-            st.session_state.last_result_img = res_img_rgb
-            st.session_state.last_reports = reports_up
-            
-            # 저장(같은 이미지에 대해 자동 저장 반복 방지)
-            if auto_save and (img_hash != st.session_state.last_saved_hash):
-                now = datetime.now()
-                ts_id = now.strftime("%Y%m%d_%H%M%S_%f")
-                ts_display = now.strftime("%Y-%m-%d %H:%M:%S")
-                fn = f"TFCP_{ts_id}"
+        # rescale reports to original coords
+        inv_scale = 1.0 / float(scale if scale > 0 else 1.0)
+        reports_up = rescale_reports(reports, inv_scale)
 
-                cv2.imwrite(
-                    os.path.join(IMG_DIR, f"{fn}.jpg"),
-                    image,
-                    [int(cv2.IMWRITE_JPEG_QUALITY), int(jpg_quality)]
-                )
+        st.session_state.last_result_img = res_img_rgb
+        st.session_state.last_reports = reports_up
 
-                with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
-                    json.dump({
-                        "filename": f"{fn}.jpg",
-                        "timestamp": ts_display,
-                        "timestamp_id": ts_id,
-                        "reports": reports_up,
-                        "reviewed": False,
-                        "app_version": APP_VERSION,
-                        "params": {
-                            "gamma": float(gamma),
-                            "model_conf": float(model_conf),
-                            "model_iou": float(model_iou),
-                            "downscale_max_side": int(max_side),
-                            "input_scale": float(scale)
-                        }
-                    }, f, indent=4)
+        # save once per new input
+        if auto_save and (img_hash != st.session_state.last_saved_hash):
+            now = datetime.now()
+            ts_id = now.strftime("%Y%m%d_%H%M%S_%f")
+            ts_display = now.strftime("%Y-%m-%d %H:%M:%S")
+            fn = f"TFCP_{ts_id}"
 
-                st.session_state.last_saved_id = fn
-                st.session_state.last_saved_hash = img_hash
+            cv2.imwrite(
+                os.path.join(IMG_DIR, f"{fn}.jpg"),
+                image,
+                [int(cv2.IMWRITE_JPEG_QUALITY), int(jpg_quality)]
+            )
 
-        # --- Display ---
-        if (st.session_state.last_result_img is not None) and (st.session_state.last_orig_img is not None):
-            with c1:
-                view_mode = st.radio(
-                    "View mode",
-                    ["Compare (Original vs Result)", "Result only", "Original only"],
-                    horizontal=True,
-                    label_visibility="collapsed"
-                )
+            with open(os.path.join(LOG_DIR, f"{fn}.json"), "w") as f:
+                json.dump({
+                    "filename": f"{fn}.jpg",
+                    "timestamp": ts_display,
+                    "timestamp_id": ts_id,
+                    "reports": reports_up,
+                    "reviewed": False,
+                    "app_version": APP_VERSION,
+                    "params": {
+                        "gamma": float(gamma),
+                        "model_conf": float(model_conf),
+                        "model_iou": float(model_iou),
+                        "downscale_max_side": int(max_side),
+                        "input_scale": float(scale)
+                    }
+                }, f, indent=4)
 
-                orig_rgb = cv2.cvtColor(st.session_state.last_orig_img, cv2.COLOR_BGR2RGB)
+            st.session_state.last_saved_id = fn
+            st.session_state.last_saved_hash = img_hash
 
-                if view_mode == "Compare (Original vs Result)":
-                    lc, rc = st.columns(2)
-                    with lc:
-                        # 원본(BGR) -> RGB로 변환해서 표시
-                        orig_rgb = cv2.cvtColor(st.session_state.last_orig_img, cv2.COLOR_BGR2RGB)
-                        st.image(orig_rgb, caption="Original", use_column_width=True)
-                    
-                        # ✅ 원본 위에 박스/라벨만 얹은 버전(색 안 깨짐)
-                        orig_overlay_rgb = draw_smart_annotations(
-                            st.session_state.last_orig_img.copy(),   # 입력은 BGR
-                            st.session_state.last_reports            # reports는 원본 좌표
-                        )
-                        # draw_smart_annotations 출력은 이미 RGB라서 cvtColor 하면 안 됨!
-                        st.image(orig_overlay_rgb, caption="Original (annotated)", use_column_width=True)
-                                        
-            
-                    with rc:
-                        st.image(st.session_state.last_result_img, caption="Result (processed/annotated)", use_column_width=True)
+    # --- Display (compare) ---
+    if (st.session_state.last_result_img is not None) and (st.session_state.last_orig_img is not None):
+        with c1:
+            view_mode = st.radio(
+                "View mode",
+                ["Compare (Original vs Result)", "Result only", "Original only"],
+                horizontal=True,
+                label_visibility="collapsed"
+            )
 
-                elif view_mode == "Original only":
+            if view_mode == "Compare (Original vs Result)":
+                lc, rc = st.columns(2)
+
+                with lc:
+                    orig_rgb = cv2.cvtColor(st.session_state.last_orig_img, cv2.COLOR_BGR2RGB)
                     st.image(orig_rgb, caption="Original", use_column_width=True)
 
-                else:  # Result only
+                    orig_overlay_rgb = draw_smart_annotations(
+                        st.session_state.last_orig_img.copy(),
+                        st.session_state.last_reports
+                    )
+                    st.image(orig_overlay_rgb, caption="Original (annotated)", use_column_width=True)
+
+                with rc:
                     st.image(st.session_state.last_result_img, caption="Result (processed/annotated)", use_column_width=True)
 
+            elif view_mode == "Original only":
+                orig_rgb = cv2.cvtColor(st.session_state.last_orig_img, cv2.COLOR_BGR2RGB)
+                st.image(orig_rgb, caption="Original", use_column_width=True)
+
+            else:
+                st.image(st.session_state.last_result_img, caption="Result (processed/annotated)", use_column_width=True)
+
+        with c2:
+            st.markdown("### Metrics")
+            pre = st.session_state.get("last_pre", {})
+            st.caption(
+                f"blue_kill applied={pre.get('applied')} | "
+                f"mode={pre.get('mode')} | "
+                f"green_present={pre.get('green_present')} | "
+                f"blue_cast={pre.get('blue_cast')}"
+            )
+
             reports = st.session_state.last_reports or []
+            if reports:
+                n_cont = sum(1 for r in reports if r.get("status") == "CONTAMINATED")
+                n_rechk = sum(1 for r in reports if r.get("status") == "RECHECK REQUIRED")
+                n_safe = sum(1 for r in reports if r.get("status") == "SAFE")
 
-            with c2:
-                st.markdown("### Metrics")
-                pre = st.session_state.get("last_pre", {})
-                st.caption(
-                    f"blue_kill applied={pre.get('applied')} | "
-                    f"mode={pre.get('mode')} | "
-                    f"green_present={pre.get('green_present')} | "
-                    f"blue_cast={pre.get('blue_cast')}"
-                )
-                st.session_state.last_pre = {}
+                m1, m2, m3 = st.columns(3)
+                m1.metric("SAFE", n_safe)
+                m2.metric("CONT", n_cont)
+                m3.metric("RECHECK", n_rechk)
 
-                reports = st.session_state.last_reports or []
+                df = pd.DataFrame(reports).copy()
+                if not df.empty:
+                    df["area"] = df["id"].astype(int) + 1
+                    cols = [c for c in ["area", "status", "phi", "cyan", "orange", "method", "signal_mode"] if c in df.columns]
+                    st.dataframe(df[cols], use_container_width=True, height=240)
 
-                # ---- Metrics debug line ----
-                pre = st.session_state.get("last_pre", {})
-                st.caption(
-                    f"blue_kill applied={pre.get('applied')} | "
-                    f"mode={pre.get('mode')} | "
-                    f"green_present={pre.get('green_present')} | "
-                    f"blue_cast={pre.get('blue_cast')}"
-                )
-
-                # ---- Summary + Table ----
-                if reports:
-                    n_cont = sum(1 for r in reports if r.get("status") == "CONTAMINATED")
-                    n_rechk = sum(1 for r in reports if r.get("status") == "RECHECK REQUIRED")
-                    n_safe = sum(1 for r in reports if r.get("status") == "SAFE")
-
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("SAFE", n_safe)
-                    m2.metric("CONT", n_cont)
-                    m3.metric("RECHECK", n_rechk)
-
-                    df = pd.DataFrame(reports).copy()
-                    if not df.empty:
-                        df["area"] = df["id"].astype(int) + 1
-                        cols = [c for c in ["area", "status", "phi", "cyan", "orange", "method", "signal_mode"] if c in df.columns]
-                        st.dataframe(df[cols], use_container_width=True, height=240)
-
-                        csv_bytes = df[cols].to_csv(index=False).encode("utf-8")
-                        st.download_button(
-                            "Download CSV",
-                            csv_bytes,
-                            file_name="tfcp_reports.csv",
-                            mime="text/csv",
-                            use_container_width=True
-                        )
-                else:
-                    st.info("No report yet. Upload/capture an image and click Run analysis.")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                    csv_bytes = df[cols].to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        "Download CSV",
+                        csv_bytes,
+                        file_name="tfcp_reports.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+            else:
+                st.info("No report yet. Upload/capture an image and click Run analysis.")
