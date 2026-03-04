@@ -551,7 +551,7 @@ def make_green_signal_mask(roi_bgr, valid_u8, containment_u8, g_min=120, diff_mi
 
     return mask, intensity_map, saturated_pixels
 
-def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45, blue_kill_enabled=True):
+def process_frame(img, gamma=0.8, model_conf=0.10, model_iou=0.45, blue_kill_enabled=True, model=None):
     """
     반환:
       final_img, reports, pre
@@ -1028,9 +1028,9 @@ elif mode == "Real-time Inference":
         should_run = True
 
     if should_run:
-        # ✅ Load YOLO only when needed
         if st.session_state.yolo_model is None:
             st.session_state.yolo_model = load_model()
+        model = st.session_state.yolo_model
 
         model = st.session_state.yolo_model
 
@@ -1157,4 +1157,5 @@ elif mode == "Real-time Inference":
                     )
             else:
                 st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
