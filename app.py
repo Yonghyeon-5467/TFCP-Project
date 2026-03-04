@@ -83,7 +83,7 @@ ADMIN_KEY = _get_secret("TFCP_ADMIN_KEY", "") or os.environ.get("TFCP_ADMIN_KEY"
 
 # --- [3] Visualization Helper (Server-Native Font) ---
 
-def get_custom_font(size=20, bold=False):
+def get_custom_font(size=40, bold=False):
     """
     Arial과 가장 유사한 Liberation Sans를 우선 사용.
     (Streamlit Cloud/Linux에서 Arial.ttf는 거의 없어서 대체 폰트가 필요)
@@ -1261,6 +1261,7 @@ elif mode == "Real-time Inference":
                         )
                 else:
                     st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
 
 
