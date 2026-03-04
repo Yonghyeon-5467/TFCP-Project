@@ -1,135 +1,35 @@
-import io
-import hashlib
-import streamlit as st
-# --- Lazy cv2 import: show the real error in UI instead of crashing at startup ---
-cv2 = None
-CV2_IMPORT_ERROR = None
-try:
-    import cv2 as _cv2
-    cv2 = _cv2
-except Exception as e:
-    CV2_IMPORT_ERROR = e
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-import os
-import json
-import shutil
-from datetime import datetime
-import pandas as pd
-
-st.set_page_config(page_title="TFCP Quantitative Analysis System", page_icon="🔬", layout="wide")
-if CV2_IMPORT_ERROR is not None:
-    st.error("❌ OpenCV(cv2) import failed")
-    st.code(repr(CV2_IMPORT_ERROR))
-    st.stop()
-# torch는 ultralytics가 내부적으로 사용합니다.
-# (기존 코드에서는 fallback에서 매번 import해서 오버헤드가 있었음)
-try:
-    import torch
-    _TORCH_OK = True
-except Exception:
-    torch = None
-    _TORCH_OK = False
-try:
-    cv2.setNumThreads(1)  # OpenCV가 코어 다 쓰는 것 방지
-except Exception:
-    pass
-
-if _TORCH_OK:
-    try:
-        torch.set_num_threads(1)
-        torch.set_num_interop_threads(1)
-    except Exception:
-        pass
-# --- [1] Page Config & CSS ---
-st.write("✅ app.py reached UI bootstrap")
-st.write("import stage passed")
-
-
-st.markdown("""
-    <style>
-        .main { background-color: #f8f9fa; }
-        .stButton>button { width: 100%; border-radius: 6px; font-weight: 500; font-family: 'Helvetica', sans-serif; }
-        .metric-card {
-            background-color: white; border: 1px solid #e1e4e8; border-radius: 10px;
-            padding: 20px; margin-bottom: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.05);
-        }
-        .status-safe { color: #28a745; font-weight: 700; }
-        .status-cont { color: #dc3545; font-weight: 700; }
-        .status-warn { color: #fd7e14; font-weight: 700; }
-        .header-text { font-family: 'Helvetica Neue', sans-serif; font-weight: 700; color: #1f2937; }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- [2] Storage & Model Setup ---
-SAVE_ROOT = "TFCP_Data"
-IMG_DIR = os.path.join(SAVE_ROOT, "raw_images")
-LOG_DIR = os.path.join(SAVE_ROOT, "analysis_logs")
-
-os.makedirs(IMG_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
-
-APP_VERSION = "10.2.2"  # 내부 로직/로그 버전 태그
-
-def load_model():
-    # ✅ 여기서만 ultralytics를 import (앱 부팅 시 cv2 강제 import 방지)
-    try:
-        from ultralytics import YOLO
-    except Exception as e:
-        # ultralytics import 실패(=cv2 문제 포함)도 UI에서 확인 가능하게
-        st.error("❌ Failed to import ultralytics (likely OpenCV/cv2 issue)")
-        st.code(repr(e))
-        return None
-
-    if os.path.exists("best.pt"):
-        try:
-            return YOLO("best.pt")
-        except Exception as e:
-            st.error("❌ Failed to load YOLO model best.pt")
-            st.code(repr(e))
-            return None
-    return None
-
-model = load_model()
-
-def _get_secret(key: str, default: str = "") -> str:
-    """Streamlit secrets가 없는 로컬 환경/배포 환경을 모두 고려한 헬퍼."""
-    try:
-        return st.secrets.get(key, default)
-    except Exception:
-        return default
-
-# 하드코딩된 키는 보안상 취약 → secrets/env 우선, 없으면 기존 값으로 fallback
-ADMIN_KEY = _get_secret("TFCP_ADMIN_KEY", "") or os.environ.get("TFCP_ADMIN_KEY", "tfcp2026")
+def get_custom_font(size=40, bold=False):
+    local_candidates = [
+        "fonts/LiberationSans-Bold.ttf" if bold else "fonts/LiberationSans-Regular.ttf",
+    ]
+    system_candidates = [
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for p in local_candidates + system_candidates:
+        if os.path.exists(p):
+            try:
+                return ImageFont.truetype(p, size)
+            except Exception:
+                pass
+    return ImageFont.load_default()
 
 # --- [3] Visualization Helper (Server-Native Font) ---
 
 def get_custom_font(size=40, bold=False):
-    """
-    Arial과 가장 유사한 Liberation Sans를 우선 사용.
-    (Streamlit Cloud/Linux에서 Arial.ttf는 거의 없어서 대체 폰트가 필요)
-    """
-    # (선택) 레포에 fonts 폴더를 만들고 넣어두면 가장 확실하게 동일 폰트가 나옴
     local_candidates = [
         "fonts/LiberationSans-Bold.ttf" if bold else "fonts/LiberationSans-Regular.ttf",
-        # Arial 파일은 라이선스 문제될 수 있어(특히 배포) 로컬에 직접 넣는 건 비권장
-        "fonts/arialbd.ttf" if bold else "fonts/arial.ttf",
     ]
-
-    # 시스템 폰트 후보 (Streamlit Cloud가 어떤 Debian을 쓰든 경로가 다를 수 있어 둘 다 체크)
     system_candidates = [
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
-
-    for font_path in local_candidates + system_candidates:
-        if os.path.exists(font_path):
+    for p in local_candidates + system_candidates:
+        if os.path.exists(p):
             try:
-                return ImageFont.truetype(font_path, size)
+                return ImageFont.truetype(p, size)
             except Exception:
-                continue
-
+                pass
     return ImageFont.load_default()
 
 def draw_smart_annotations(img_bgr, reports, show_box_labels=True, show_global_label=False):
@@ -1282,6 +1182,7 @@ elif mode == "Real-time Inference":
                         )
                 else:
                     st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
 
 
