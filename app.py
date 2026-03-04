@@ -31,6 +31,8 @@ if _TORCH_OK:
     except Exception:
         pass
 # --- [1] Page Config & CSS ---
+st.write("✅ app.py reached UI bootstrap")
+st.write("import stage passed")
 st.set_page_config(page_title="TFCP Quantitative Analysis System", page_icon="🔬", layout="wide")
 
 st.markdown("""
@@ -1247,6 +1249,7 @@ elif mode == "Real-time Inference":
                         )
                 else:
                     st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
 
 
