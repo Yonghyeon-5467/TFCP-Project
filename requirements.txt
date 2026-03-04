@@ -2,11 +2,6 @@ streamlit==1.39.0
 numpy<2
 pillow
 
-# ultralytics 고정(불필요한 의존성 변화 방지)
-ultralytics==8.4.19
-
-# opencv는 headless만 + 버전 고정
 opencv-python-headless==4.11.0.86
-
-# torch는 python 3.11에선 OK
+ultralytics==8.4.19
 torch
