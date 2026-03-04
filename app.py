@@ -132,9 +132,9 @@ def draw_smart_annotations(img_bgr, reports, show_box_labels=True, show_global_l
 
     # 스케일 (작은 이미지에서도 너무 작아지지 않게)
     scale = max(w, h) / 1200.0
-    line_width = max(1, int(3 * scale))
-    font_size = max(14, int(24 * scale))
-    pad = max(4, int(6 * scale))
+    line_width = max(2, int(4 * scale))
+    font_size = max(26, int(34 * scale))
+    pad = max(8, int(10 * scale))
 
     font = get_custom_font(font_size, bold=False)
 
@@ -1189,7 +1189,12 @@ elif mode == "Real-time Inference":
                 if view_mode == "Compare (Original vs Result)":
                     lc, rc = st.columns(2)
                     with lc:
-                        st.image(orig_rgb, caption="Original", use_column_width=True)
+                        
+                        # 원본 위에도 동일 reports를 그려서 표시 (색 보정 없이 원본 위에 얹음)
+                        orig_annot = draw_smart_annotations(st.session_state.last_orig_img.copy(), st.session_state.last_reports)
+                        
+                        orig_annot_rgb = cv2.cvtColor(orig_annot, cv2.COLOR_BGR2RGB)  # draw_smart_annotations는 RGB 반환인데, 안전하게 맞춤
+                        st.image(orig_annot_rgb, caption="Original (annotated)", use_column_width=True)
                     with rc:
                         st.image(st.session_state.last_result_img, caption="Result (processed/annotated)", use_column_width=True)
 
@@ -1250,6 +1255,7 @@ elif mode == "Real-time Inference":
                         )
                 else:
                     st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
 
 
