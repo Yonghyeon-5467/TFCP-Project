@@ -1,7 +1,14 @@
 import io
 import hashlib
 import streamlit as st
-import cv2
+# --- Lazy cv2 import: show the real error in UI instead of crashing at startup ---
+cv2 = None
+CV2_IMPORT_ERROR = None
+try:
+    import cv2 as _cv2
+    cv2 = _cv2
+except Exception as e:
+    CV2_IMPORT_ERROR = e
 import numpy as np
 from ultralytics import YOLO
 from PIL import Image, ImageDraw, ImageFont
@@ -1261,6 +1268,7 @@ elif mode == "Real-time Inference":
                         )
                 else:
                     st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
 
 
