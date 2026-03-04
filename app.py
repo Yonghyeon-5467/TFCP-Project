@@ -10,7 +10,6 @@ try:
 except Exception as e:
     CV2_IMPORT_ERROR = e
 import numpy as np
-from ultralytics import YOLO
 from PIL import Image, ImageDraw, ImageFont
 import os
 import json
@@ -73,10 +72,21 @@ os.makedirs(LOG_DIR, exist_ok=True)
 APP_VERSION = "10.2.2"  # 내부 로직/로그 버전 태그
 
 def load_model():
-    if os.path.exists('best.pt'):
+    # ✅ 여기서만 ultralytics를 import (앱 부팅 시 cv2 강제 import 방지)
+    try:
+        from ultralytics import YOLO
+    except Exception as e:
+        # ultralytics import 실패(=cv2 문제 포함)도 UI에서 확인 가능하게
+        st.error("❌ Failed to import ultralytics (likely OpenCV/cv2 issue)")
+        st.code(repr(e))
+        return None
+
+    if os.path.exists("best.pt"):
         try:
-            return YOLO('best.pt')
-        except Exception:
+            return YOLO("best.pt")
+        except Exception as e:
+            st.error("❌ Failed to load YOLO model best.pt")
+            st.code(repr(e))
             return None
     return None
 
@@ -1272,6 +1282,7 @@ elif mode == "Real-time Inference":
                         )
                 else:
                     st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
 
 
