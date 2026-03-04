@@ -322,7 +322,7 @@ def draw_smart_annotations(
         col = status_color_bgr(status)
 
         # 박스
-        cv2.rectangle(img, (x1, y1), (x2, y2), col, thickness=line_w)
+        CV2.rectangle(img, (x1, y1), (x2, y2), col, thickness=line_w)
 
         # 박스 라벨
         if show_box_labels:
@@ -1275,5 +1275,6 @@ else:
                 )
             else:
                 st.info("No report yet. Click Run analysis.")
+
 
 
