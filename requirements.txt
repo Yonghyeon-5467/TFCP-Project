@@ -2,9 +2,11 @@ streamlit==1.39.0
 numpy<2
 pillow
 
-# torch는 python 3.11에서만 안정적으로 맞음(너 지금 3.11이라 OK)
-torch
-ultralytics
+# ultralytics 고정(불필요한 의존성 변화 방지)
+ultralytics==8.4.19
 
-# ✅ 맨 마지막에 headless를 "핀" 해서 최종 cv2를 headless로 덮어쓰기
+# opencv는 headless만 + 버전 고정
 opencv-python-headless==4.11.0.86
+
+# torch는 python 3.11에선 OK
+torch
