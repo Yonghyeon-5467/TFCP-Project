@@ -82,7 +82,7 @@ def _get_secret(key: str, default: str = "") -> str:
 ADMIN_KEY = _get_secret("TFCP_ADMIN_KEY", "") or os.environ.get("TFCP_ADMIN_KEY", "tfcp2026")
 
 # --- [3] Visualization Helper (Server-Native Font) ---
-@st.cache_resource
+
 def get_custom_font(size=20, bold=False):
     """
     Arial과 가장 유사한 Liberation Sans를 우선 사용.
@@ -1261,6 +1261,7 @@ elif mode == "Real-time Inference":
                         )
                 else:
                     st.info("No report yet. Upload/capture an image and click Run analysis.")
+
 
 
 
