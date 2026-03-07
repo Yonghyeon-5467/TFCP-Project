@@ -1054,10 +1054,10 @@ else:
 
     # ---------------- Input UI ----------------
     if not st.session_state.has_result:
-    with c1:
-        img_file = st.camera_input("Acquire")
-        if not img_file:
-            img_file = st.file_uploader("Upload", type=["jpg", "jpeg", "png"])
+        with c1:
+            img_file = st.camera_input("Acquire")
+            if not img_file:
+                img_file = st.file_uploader("Upload", type=["jpg", "jpeg", "png"])
     else:
         img_file = None
 
@@ -1270,4 +1270,5 @@ else:
                 )
             else:
                 st.info("No results.")
+
 
