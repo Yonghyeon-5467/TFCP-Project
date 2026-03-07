@@ -1053,6 +1053,8 @@ else:
         st.session_state.has_result = False
 
     # ---------------- Input UI ----------------
+    if "has_result" not in st.session_state:
+        st.session_state.has_result = False
     if not st.session_state.has_result:
         with c1:
             img_file = st.camera_input("Acquire")
@@ -1270,5 +1272,6 @@ else:
                 )
             else:
                 st.info("No results.")
+
 
 
