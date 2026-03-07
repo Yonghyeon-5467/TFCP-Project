@@ -789,7 +789,7 @@ def process_frame(
 
                 phi = signal_area * (avg_int / 10.0)
 
-                status = "CONTAMINATED" if (phi > 5.0 or saturated_pixels > 20) else "SAFE"
+                status = "CONTAMINATED" if (phi > 3.0 or saturated_pixels > 20) else "SAFE"
                 if status == "CONTAMINATED" and phi < 5.0:
                     phi = 99.9
 
@@ -1272,6 +1272,7 @@ else:
                 )
             else:
                 st.info("No results.")
+
 
 
 
