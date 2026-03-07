@@ -756,7 +756,7 @@ def process_frame(
                 avg_int = float(np.mean(intensity_map[mask_sig > 0])) if sig_px > 0 else 0.0
                 phi = signal_area * (avg_int / 10.0)
 
-                status = "CONTAMINATED" if (phi > 5.0 or saturated_pixels > 20) else "SAFE"
+                status = "CONTAMINATED" if (phi > 3.0 or saturated_pixels > 20) else "SAFE"
                 if status == "CONTAMINATED" and phi < 5.0:
                     phi = 99.9
             else:
@@ -1272,6 +1272,7 @@ else:
                 )
             else:
                 st.info("No results.")
+
 
 
 
