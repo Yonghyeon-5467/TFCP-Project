@@ -1021,14 +1021,14 @@ else:
     blue_kill_enabled = st.sidebar.checkbox("Enable Blue-kill when no green", value=True)
 
     with st.sidebar.expander("Blue-kill advanced"):
-        bk_green_ratio_thr = st.slider("GREEN_RATIO_THR", 0.0, 0.30, 0.07, 0.01)
-        bk_blue_dom90_thr = st.slider("BLUE_DOM90_THR", 0.0, 60.0, 15.0, 1.0)
-        bk_b90_thr = st.slider("B90_THR", 0.0, 255.0, 110.0, 5.0)
-        bk_b_floor_pct = st.slider("b_floor_percentile", 1, 50, 15, 1)
-
-        bk_gain = st.slider("BLUEKILL_GAIN", 0.001, 0.20, 0.01, 0.001)
-        bk_strength = st.slider("BLUEKILL_STRENGTH", 0.1, 5.0, 2.0, 0.1)
-        bk_cap = st.slider("BLUEKILL_CAP_DELTA", 0, 50, 1, 1)
+        bk_green_ratio_thr = st.slider("GREEN_RATIO_THR", 0.0, 0.30, 0.12, 0.01)
+        bk_blue_dom90_thr  = st.slider("BLUE_DOM90_THR", 0.0, 60.0, 11.0, 1.0)
+        bk_b90_thr         = st.slider("B90_THR", 0.0, 255.0, 95.0, 5.0)
+        bk_b_floor_pct     = st.slider("b_floor_percentile", 1, 50, 25, 1)
+    
+        bk_gain            = st.slider("BLUEKILL_GAIN", 0.001, 0.20, 0.01, 0.001)
+        bk_strength        = st.slider("BLUEKILL_STRENGTH", 0.1, 5.0, 3.0, 0.1)
+        bk_cap             = st.slider("BLUEKILL_CAP_DELTA", 0, 50, 1, 1)
 
     auto_run_on_new = st.sidebar.checkbox("Auto-run when new image arrives", value=True)
     auto_save = st.sidebar.checkbox("Auto-save run to logs", value=True)
@@ -1272,6 +1272,7 @@ else:
                 )
             else:
                 st.info("No results.")
+
 
 
 
