@@ -1050,12 +1050,16 @@ else:
         st.session_state.reports_up = []
         st.session_state.pre = {}
         st.session_state.result_rgb = None
+        st.session_state.has_result = False
 
     # ---------------- Input UI ----------------
+    if not st.session_state.has_result:
     with c1:
         img_file = st.camera_input("Acquire")
         if not img_file:
             img_file = st.file_uploader("Upload", type=["jpg", "jpeg", "png"])
+    else:
+        img_file = None
 
     if not img_file:
         st.info("새 이미지를 업로드/촬영하면 분석할 수 있습니다.")
@@ -1080,11 +1084,22 @@ else:
         st.session_state.scale = scale
 
     # ---------------- Run buttons ----------------
-    with c2:
-        run_btn = st.button("Run analysis", type="primary", use_container_width=True)
-        rerun_btn = st.button("Re-run (same image)", use_container_width=True)
+    if not st.session_state.has_result:
+        with c2:
+            run_btn = st.button("Run analysis", type="primary", use_container_width=True)
+            rerun_btn = st.button("Re-run (same image)", use_container_width=True)
 
-    should_run = False
+        should_run = False
+        if rerun_btn:
+            should_run = True
+        elif run_btn:
+            should_run = True
+        elif auto_run_on_new and (img_hash != st.session_state.last_img_hash):
+            should_run = True
+    else:
+        should_run = False
+
+
     if rerun_btn:
         should_run = True
     elif run_btn:
@@ -1156,6 +1171,7 @@ else:
         st.session_state.reports_up = reports_up
         st.session_state.pre = pre
         st.session_state.result_rgb = processed_orig_rgb
+        st.session_state.has_result = True
 
         # save once per new input
         if auto_save and (img_hash != st.session_state.last_saved_hash):
@@ -1197,84 +1213,61 @@ else:
             st.session_state.last_saved_hash = img_hash
 
     # ---------------- Display ----------------
-    if st.session_state.orig_bgr is not None:
-        with c1:
-            view_mode = st.radio(
-                "View mode",
-                ["Compare (Original vs Result)", "Result only", "Original only"],
-                horizontal=True,
-                label_visibility="collapsed",
+    if st.session_state.has_result and st.session_state.orig_bgr is not None:
+        # 다시 측정 버튼(입력 UI로 돌아감)
+        if st.button("🆕 New measurement", use_container_width=True):
+            st.session_state.has_result = False
+            st.session_state.last_proc_hash = None
+            st.session_state.last_img_hash = None
+            st.session_state.last_saved_hash = None
+            st.session_state.orig_bgr = None
+            st.session_state.proc_bgr = None
+            st.session_state.scale = 1.0
+            st.session_state.reports_up = []
+            st.session_state.pre = {}
+            st.session_state.result_rgb = None
+            st.rerun()
+    
+        col_img, col_tbl = st.columns([2, 1])
+    
+        with col_img:
+            # ✅ Original(annotated)만
+            orig_annot = draw_smart_annotations(
+                st.session_state.orig_bgr.copy(),
+                st.session_state.reports_up,
+                show_box_labels=True,
+                show_global_label=True,
+                label_scale=label_scale
             )
-
-            orig_rgb = CV2.cvtColor(st.session_state.orig_bgr, CV2.COLOR_BGR2RGB)
-
-            if view_mode == "Original only":
-                st.image(orig_rgb, caption="Original", use_column_width=True)
-
-            elif view_mode == "Result only":
-                if st.session_state.result_rgb is not None:
-                    st.image(st.session_state.result_rgb, caption="Result (processed/annotated)", use_column_width=True)
-                else:
-                    st.info("Run analysis to see results.")
-
-            else:
-                lc, rc = st.columns(2)
-                with lc:
-                    st.image(orig_rgb, caption="Original", use_column_width=True)
-
-                    if st.session_state.reports_up:
-                        orig_annot = draw_smart_annotations(
-                            st.session_state.orig_bgr.copy(),
-                            st.session_state.reports_up,
-                            show_box_labels=show_box_labels,
-                            show_global_label=show_global_label,
-                            label_scale=label_scale,
-                        )
-                        st.image(orig_annot, caption="Original (annotated)", use_column_width=True)
-
-                with rc:
-                    if st.session_state.result_rgb is not None:
-                        st.image(st.session_state.result_rgb, caption="Result (processed/annotated)", use_column_width=True)
-                    else:
-                        st.info("Run analysis to see results.")
-
-        with c2:
-            st.markdown("### Metrics")
-
-            pre = st.session_state.pre or {}
-            st.caption(
-                f"blue_kill applied={pre.get('applied')} | "
-                f"mode={pre.get('mode')} | "
-                f"green_present={pre.get('green_present')} | "
-                f"blue_cast={pre.get('blue_cast')}"
-            )
-
+            st.image(orig_annot, caption="Original (annotated)", use_column_width=True)
+    
+        with col_tbl:
+            st.markdown("### Results")
             reports = st.session_state.reports_up or []
+    
             if reports:
                 n_cont = sum(1 for r in reports if r.get("status") == "CONTAMINATED")
                 n_rechk = sum(1 for r in reports if r.get("status") == "RECHECK REQUIRED")
                 n_safe = sum(1 for r in reports if r.get("status") == "SAFE")
-
+    
                 m1, m2, m3 = st.columns(3)
                 m1.metric("SAFE", n_safe)
                 m2.metric("CONT", n_cont)
                 m3.metric("RECHECK", n_rechk)
-
+    
                 df = pd.DataFrame(reports).copy()
                 df["area"] = df["id"].astype(int) + 1
                 cols = [c for c in ["area", "status", "phi", "cyan", "orange", "method", "signal_mode"] if c in df.columns]
-                st.dataframe(df[cols], use_container_width=True, height=260)
-
+                st.dataframe(df[cols], use_container_width=True, height=320)
+    
                 csv_bytes = df[cols].to_csv(index=False).encode("utf-8")
                 st.download_button(
                     "Download CSV",
                     csv_bytes,
                     file_name="tfcp_reports.csv",
                     mime="text/csv",
-                    use_container_width=True,
+                    use_container_width=True
                 )
             else:
-                st.info("No report yet. Click Run analysis.")
-
-
+                st.info("No results.")
 
